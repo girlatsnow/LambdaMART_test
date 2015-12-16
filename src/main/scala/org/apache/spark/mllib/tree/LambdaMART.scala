@@ -1,33 +1,33 @@
 package org.apache.spark.mllib.tree
 
 import org.apache.spark.Logging
-import org.apache.spark.annotation.Experimental
-import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.tree.configuration.BoostingStrategy
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.tree.configuration.Algo._
+import org.apache.spark.mllib.tree.configuration.BoostingStrategy
 import org.apache.spark.mllib.tree.impl.TimeTracker
 import org.apache.spark.mllib.tree.impurity.Variance
-//import org.apache.spark.mllib.tree.model.{DecisionTreeModel, GradientBoostedTreesModel}
-import org.apache.spark.rdd.RDD
-import org.apache.spark.storage.StorageLevel
 import org.apache.spark.mllib.tree.model.SplitInfo
-import org.apache.spark.mllib.tree.model.GetDerivatives
-import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
+import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
+import org.apache.spark.mllib.util.TreeUtils
+import org.apache.spark.rdd.RDD
 
-@Experimental
-class LambdaMART(private val boostingStrategy: BoostingStrategy)
-  extends Serializable with Logging {
-  
+
+class LambdaMART(
+    val boostingStrategy: BoostingStrategy,
+    val maxSplits: Int) extends Serializable with Logging {
+
   def run(
       trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+      trainingData_T: RDD[(Int, Array[Array[Byte]])],
       labelScores: Array[Short],
       initScores: Array[Double],
       queryBoundy: Array[Int]): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
     algo match {
       case Regression =>
-        LambdaMART.boost(trainingData, labelScores, initScores, queryBoundy, boostingStrategy)
+        LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,
+          boostingStrategy, maxSplits)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by the implementation of LambdaMART.")
     }
@@ -38,19 +38,24 @@ object LambdaMART extends Logging {
 
   def train(
       trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+      trainingData_T: RDD[(Int, Array[Array[Byte]])],
       labelScores: Array[Short],
       initScores: Array[Double],
       queryBoundy: Array[Int],
-      boostingStrategy: BoostingStrategy): GradientBoostedDecisionTreesModel = {
-    new LambdaMART(boostingStrategy).run(trainingData, labelScores, initScores, queryBoundy)
+      boostingStrategy: BoostingStrategy,
+      maxSplits: Int): GradientBoostedDecisionTreesModel = {
+    new LambdaMART(boostingStrategy, maxSplits)
+      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
   }
   
   private def boost(
       trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+      trainingData_T: RDD[(Int, Array[Array[Byte]])],
       labelScores: Array[Short],
       initScores: Array[Double],
       queryBoundy: Array[Int],
-      boostingStrategy: BoostingStrategy): GradientBoostedDecisionTreesModel = {
+      boostingStrategy: BoostingStrategy,
+      maxSplits: Int): GradientBoostedDecisionTreesModel = {
     val timer = new TimeTracker()
     timer.start("total")
     timer.start("init")
@@ -71,85 +76,97 @@ object LambdaMART extends Logging {
     treeStrategy.impurity = Variance
     treeStrategy.assertValid()
 
-    // Cache trainingData
-    val persistedInput = if (trainingData.getStorageLevel == StorageLevel.NONE) {
-      trainingData.persist(StorageLevel.MEMORY_AND_DISK)
-      true
-    } else {
-      false
-    }
+    val sc= trainingData.sparkContext
+    val numSamples = labelScores.length
+    val numQueries = queryBoundy.length - 1
+    val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultMinPartitions)
+    val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("PDCCtrl")
+
+    val dc = new DerivativeCalculator
+    dc.init(labelScores, queryBoundy)
+    val dcBc = sc.broadcast(dc)
+    val lambdas = new Array[Double](numSamples)
+    val weights = new Array[Double](numSamples)
 
     timer.stop("init")
-    // calculate discount
 
-    val maxDocument = labelScores.length
-    var aDiscount = Array.tabulate(maxDocument) { index =>
-        1.0/scala.math.log(1.0 + index.toDouble + 1.0)
-    }
-
-    var aSecondaryGains = new Array[Double](labelScores.length)
-    var aGainLabels = labelScores.map(_.toDouble)
-
-    var aLabels = Array.tabulate(labelScores.length) { index =>
-        (scala.math.log(labelScores(index))/scala.math.log(2)).toShort
-    }
-    
-    var sigmoidTable = GetDerivatives.FillSigmoidTable()
-    
-    var lambdas = new Array[Double](labelScores.length)
-    var weights = new Array[Double](labelScores.length)
-
-    for(i <- 0 until (queryBoundy.length-1)) {
-      var numDocuments = queryBoundy(i+1) - queryBoundy(i)
-      var begin = queryBoundy(i)
-      var aPermutation = GetDerivatives.sortArray(initScores, begin, numDocuments)
-
-      var gainLabelSortArr = GetDerivatives.labelSort(aGainLabels, begin, numDocuments)
-      var inverseMaxDCG: Double = 0.0
-      for(i <- 0 until numDocuments) {
-          inverseMaxDCG += gainLabelSortArr(i)* aDiscount(i)
-      }
-      
-      inverseMaxDCG = if(inverseMaxDCG != 0.0) 1/inverseMaxDCG else 0.0
-      
-      GetDerivatives.GetDerivatives_lambda_weight(
-        numDocuments, begin,
-        aPermutation, aLabels, initScores, lambdas, weights,
-        aDiscount, aGainLabels, inverseMaxDCG,
-        sigmoidTable, GetDerivatives._minScore, GetDerivatives._maxScore, 
-        GetDerivatives._scoreToSigmoidTableFactor, aSecondaryGains)
-    }
-    var targetScores = lambdas
-    
-    var m = 0  
+    val currentScores = initScores
+    var m = 0
     while (m < numIterations) {
       timer.start(s"building tree $m")
-      logDebug("###################################################")
-      logDebug("Gradient boosting tree iteration " + m)
-      logDebug("###################################################")
-      val (model, residualScores, derivativeWeights) = new LambdaMARTDecisionTree(treeStrategy).run(trainingData, targetScores, labelScores, queryBoundy, weights)
+      println("\nGradient boosting tree iteration " + m)
+
+      val currentScoresBc = sc.broadcast(currentScores)
+      updateDerivatives(pdcRDD, dcBc, currentScoresBc, lambdas, weights)
+      currentScoresBc.destroy(blocking=false)
+
+      val lambdasBc = sc.broadcast(lambdas)
+      val weightsBc = sc.broadcast(weights)
+      val tree = new LambdaMARTDecisionTree(treeStrategy, maxSplits)
+      val (model, treeScores) = tree.run(trainingData, trainingData_T, lambdasBc, weightsBc, numSamples)
+      lambdasBc.destroy(blocking=false)
+      weightsBc.destroy(blocking=false)
       timer.stop(s"building tree $m")
-      
-      model.sequence("D:\\spark-1.4.0-bin-hadoop2.6\\LambdaMART-v1\\dt.model", model)
 
       baseLearners(m) = model
       baseLearnerWeights(m) = learningRate
-        
-      logDebug("error of gbt = " + residualScores.map( re => re * re).sum / residualScores.size)
-      
+
+      Range(0, numSamples).par.foreach(si =>
+        currentScores(si) -= learningRate * treeScores(si)
+      )
+      val deltaDcg = evaluateDeltaDCG(pdcRDD, dcBc, currentScores)
+      println(s"Delta DCG = $deltaDcg")
+      // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
+
+      model.sequence("dt.model", model)
       m += 1
-      targetScores = residualScores
-      weights = derivativeWeights
     }
-  
+
     timer.stop("total")
 
-    logInfo("Internal timing for LambdaMARTDecisionTree:")
-    logInfo(s"$timer")
+    println("Internal timing for LambdaMARTDecisionTree:")
+    println(s"$timer")
 
-    if (persistedInput) trainingData.unpersist()
-    
-    new GradientBoostedDecisionTreesModel(
-      boostingStrategy.treeStrategy.algo, baseLearners, baseLearnerWeights)
+    trainingData.unpersist(blocking=false)
+    trainingData_T.unpersist(blocking=false)
+
+    new GradientBoostedDecisionTreesModel(Regression, baseLearners, baseLearnerWeights)
+  }
+
+  def updateDerivatives(
+      pdcRDD: RDD[(Int, Int)],
+      dcBc: Broadcast[DerivativeCalculator],
+      currentScoresBc: Broadcast[Array[Double]],
+      lambdas: Array[Double],
+      weights: Array[Double]): Unit = {
+    val derivs = pdcRDD.mapPartitions(iter => {
+      val dc = dcBc.value
+      val currentScores = currentScoresBc.value
+      iter.map(Function.tupled((qiMin, lcNumQueries) => {
+        val derivsPP = dc.getDerivatives(currentScores, qiMin, qiMin + lcNumQueries)
+        (qiMin, derivsPP)
+      }))
+    }, preservesPartitioning=true).collect()
+    derivs.par.foreach { case (qiMin, (lcLambdas, lcWeights)) =>
+      Array.copy(lcLambdas, 0, lambdas, qiMin, lcLambdas.length)
+      Array.copy(lcWeights, 0, weights, qiMin, lcWeights.length)
+    }
+  }
+
+  def evaluateDeltaDCG(
+      pdcRDD: RDD[(Int, Int)],
+      dcBc: Broadcast[DerivativeCalculator],
+      currentScores: Array[Double]): Double = {
+    val sc = pdcRDD.context
+    val currentScoresBc = sc.broadcast(currentScores)
+    val deltaDcg = pdcRDD.mapPartitions(iter => {
+      val dc = dcBc.value
+      val currentScores = currentScoresBc.value
+      iter.map(Function.tupled((qiMin, lcNumQueries) => {
+        dc.calcError(currentScores, qiMin, qiMin + lcNumQueries)
+      }))
+    }).sum()
+    currentScoresBc.destroy(blocking=false)
+    deltaDcg
   }
 }
