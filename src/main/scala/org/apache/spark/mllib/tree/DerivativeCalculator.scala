@@ -22,7 +22,7 @@ class DerivativeCalculator extends Serializable {
   def init(labelScores: Array[Short], queryBoundy: Array[Int], sigma: Double = 1.0): Unit = {
     initSigmoidTable(sigma)
 
-    discounts = Array.tabulate(1024)(i => 1.0 / math.log(i + 2))
+    discounts = Array.tabulate(1024)(i => 1.0 / math.log(i + 2.0))
     this.labelScores = labelScores
     labels = labelScores.map(score => Integer.numberOfTrailingZeros(score + 1).toByte)
     secondaryGains = new Array[Double](labelScores.length)
@@ -117,8 +117,8 @@ class DerivativeCalculator extends Serializable {
 
   private def calcQueryDerivatives(qi: Int,
       scores: Array[Double],
-      lambdas: Array[Double],
-      weights: Array[Double],
+      lcLambdas: Array[Double],
+      lcWeights: Array[Double],
       lcMin: Int,
       secondaryMetricShare: Double = 0.0,
       secondaryExclusive: Boolean = false,
@@ -142,7 +142,11 @@ class DerivativeCalculator extends Serializable {
     //val pGainLabels = siMin
 
     val bestScore = scores(permutation.head + siMin)
-    val worstScore = scores(permutation.last + siMin)
+    var worstIndexToConsider = numDocs - 1
+    while (worstIndexToConsider > 0 && scores(permutation(worstIndexToConsider)) == minDoubleValue) {
+      worstIndexToConsider -= 1
+    }
+    val worstScore = scores(permutation(worstIndexToConsider) + siMin)
 
     var lambdaSum = 0.0
 
@@ -153,16 +157,13 @@ class DerivativeCalculator extends Serializable {
     for (odi <- 0 until numDocs)
     {
       val di = permutation(odi)
-      val siHigh = di + siMin
+      val sHigh = di + siMin
+      val labelHigh = labels(sHigh)
+      val scoreHigh = scores(sHigh)
       // We are going to loop through all pairs where label[siHigh] > label[low]. If label[siHigh] is 0, it can't be larger
       // If score[siHigh] is Double.MinValue, it's being discarded by shifted NDCG
       //println("aLabels(siHigh)", aLabels(siHigh), "aScores(siHigh)", aScores(siHigh), "minDoubleValue", minDoubleValue, "pairSame", pairSame)
-      if (!((labels(siHigh) == 0 && !pairSame) || scores(siHigh) == minDoubleValue)) { // These variables are all looked up just once per loop of 'i', so do it here.
-
-        val labelScoreHigh = labelScores(siHigh)
-        val labelHigh = labels(siHigh)
-        val scoreHigh = scores(siHigh)
-        val discountI = discounts(odi)
+      if (!((labelHigh == 0 && !pairSame) || scoreHigh == minDoubleValue)) { // These variables are all looked up just once per loop of 'i', so do it here.
         // These variables will store the accumulated lambda and weight difference for siHigh, which saves time
         var deltaLambdasHigh: Double = 0
         var deltaWeightsHigh: Double = 0
@@ -171,21 +172,21 @@ class DerivativeCalculator extends Serializable {
           // only consider pairs with different labels, where "siHigh" has a higher label than "siLow"
           // If score[siLow] is Double.MinValue, it's being discarded by shifted NDCG
           val dj = permutation(odj)
-          val siLow = dj + siMin
-          val labelLow = labels(siLow)
-          val scoreLow = scores(siLow)
+          val sLow = dj + siMin
+          val labelLow = labels(sLow)
+          val scoreLow = scores(sLow)
 
           val flag = if (pairSame) labelHigh < labelLow else labelHigh <= labelLow
-          if (!(flag || scores(siLow) == minDoubleValue)) {
+          if (!(flag || scores(sLow) == minDoubleValue)) {
             val scoreHighMinusLow = scoreHigh - scoreLow
             if (!(secondaryMetricShare == 0.0 && labelHigh == labelLow && scoreHighMinusLow <= 0)) {
 
               //println("labelHigh", labelHigh, "aLabels(siLow)", aLabels(siLow), "scoreHighMinusLow", scoreHighMinusLow)
-              var dcgGap: Double = labelScoreHigh - labelScores(siLow)
+              var dcgGap: Double = labelScores(sHigh) - labelScores(sLow)
               var currentInverseMaxDCG = inverseMaxDCG * (1.0 - secondaryMetricShare)
 
               // Handle risk w.r.t. baseline.
-              val pairedDiscount = (discountI - discounts(odj)).abs
+              val pairedDiscount = (discounts(odi) - discounts(odj)).abs
               if (alphaRisk > 0) {
                 val risk = {
                   val baselineDenorm = baselineVersusCurrentDcg / pairedDiscount
@@ -205,8 +206,6 @@ class DerivativeCalculator extends Serializable {
                 }
               }
 
-              var sameLabel: Boolean = labelHigh == labelLow
-
               // calculate the lambdaP for this pair by looking it up in the lambdaTable (computed in LambdaMart.FillLambdaTable)
               val lambdaP = if (scoreHighMinusLow <= minScore) {
                 minSigmoid
@@ -215,20 +214,19 @@ class DerivativeCalculator extends Serializable {
               } else {
                 sigmoidTable(((scoreHighMinusLow - minScore) * scoreToSigmoidTableFactor).toInt)
               }
-
-
               val weightP = lambdaP * (2.0 - lambdaP)
 
-              if (!(secondaryMetricShare != 0.0 && (sameLabel || currentInverseMaxDCG == 0.0) && secondaryGains(siHigh) <= secondaryGains(siLow))) {
+              var sameLabel = labelHigh == labelLow
+              if (!(secondaryMetricShare != 0.0 && (sameLabel || currentInverseMaxDCG == 0.0) && secondaryGains(sHigh) <= secondaryGains(sLow))) {
                 if (secondaryMetricShare != 0.0) {
                   if (sameLabel || currentInverseMaxDCG == 0.0) {
                     // We should use the secondary metric this time.
-                    dcgGap = secondaryGains(siHigh) - secondaryGains(siLow)
+                    dcgGap = secondaryGains(sHigh) - secondaryGains(sLow)
                     currentInverseMaxDCG = secondaryInverseMaxDCG * secondaryMetricShare
                     sameLabel = false
-                  } else if (!secondaryExclusive && secondaryGains(siHigh) > secondaryGains(siLow)) {
+                  } else if (!secondaryExclusive && secondaryGains(sHigh) > secondaryGains(sLow)) {
                     var sIDCG = secondaryInverseMaxDCG * secondaryMetricShare
-                    dcgGap = dcgGap / sIDCG + (secondaryGains(siHigh) - secondaryGains(siLow)) / currentInverseMaxDCG
+                    dcgGap = dcgGap / sIDCG + (secondaryGains(sHigh) - secondaryGains(sLow)) / currentInverseMaxDCG
                     currentInverseMaxDCG *= sIDCG
                   }
                 }
@@ -246,8 +244,8 @@ class DerivativeCalculator extends Serializable {
                 // update lambdas and weights
                 deltaLambdasHigh += lambdaP * deltaNDCGP
                 deltaWeightsHigh += weightP * deltaNDCGP
-                lambdas(dj + lcMin) -= lambdaP * deltaNDCGP
-                weights(dj + lcMin) += weightP * deltaNDCGP
+                lcLambdas(dj + lcMin) -= lambdaP * deltaNDCGP
+                lcWeights(dj + lcMin) += weightP * deltaNDCGP
 
                 lambdaSum += 2 * lambdaP * deltaNDCGP
               }
@@ -256,8 +254,8 @@ class DerivativeCalculator extends Serializable {
         }
         //Finally, add the values for the siHigh part of the pair that we accumulated across all the low parts
 
-        lambdas(di + lcMin) += deltaLambdasHigh
-        weights(di + lcMin) += deltaWeightsHigh
+        lcLambdas(di + lcMin) += deltaLambdasHigh
+        lcWeights(di + lcMin) += deltaWeightsHigh
 
         //for(i <- 0 until numDocs) println(aLambdas(siMin + i), aWeights(siMin + i))
       }
