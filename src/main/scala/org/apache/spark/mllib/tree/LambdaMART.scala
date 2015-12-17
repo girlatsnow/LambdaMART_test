@@ -79,7 +79,7 @@ object LambdaMART extends Logging {
     val sc= trainingData.sparkContext
     val numSamples = labelScores.length
     val numQueries = queryBoundy.length - 1
-    val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultMinPartitions)
+    val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultParallelism)
     val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("PDCCtrl")
 
     val dc = new DerivativeCalculator
@@ -114,8 +114,8 @@ object LambdaMART extends Logging {
       Range(0, numSamples).par.foreach(si =>
         currentScores(si) -= learningRate * treeScores(si)
       )
-      val deltaDcg = evaluateDeltaDCG(pdcRDD, dcBc, currentScores)
-      println(s"Delta DCG = $deltaDcg")
+      val errors = evaluateErrors(pdcRDD, dcBc, currentScores)
+      println(s"NDCG error sum = $errors")
       // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
 
       model.sequence("dt.model", model)
@@ -139,34 +139,33 @@ object LambdaMART extends Logging {
       currentScoresBc: Broadcast[Array[Double]],
       lambdas: Array[Double],
       weights: Array[Double]): Unit = {
-    val derivs = pdcRDD.mapPartitions(iter => {
+    val partDerivs = pdcRDD.mapPartitions(iter => {
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
       iter.map(Function.tupled((qiMin, lcNumQueries) => {
-        val derivsPP = dc.getDerivatives(currentScores, qiMin, qiMin + lcNumQueries)
-        (qiMin, derivsPP)
+        dc.getPartDerivatives(currentScores, qiMin, qiMin + lcNumQueries)
       }))
-    }, preservesPartitioning=true).collect()
-    derivs.par.foreach { case (qiMin, (lcLambdas, lcWeights)) =>
-      Array.copy(lcLambdas, 0, lambdas, qiMin, lcLambdas.length)
-      Array.copy(lcWeights, 0, weights, qiMin, lcWeights.length)
-    }
+    }).collect()
+    partDerivs.par.foreach(Function.tupled((siMin, lcLambdas, lcWeights) => {
+      Array.copy(lcLambdas, 0, lambdas, siMin, lcLambdas.length)
+      Array.copy(lcWeights, 0, weights, siMin, lcWeights.length)
+    }))
   }
 
-  def evaluateDeltaDCG(
+  def evaluateErrors(
       pdcRDD: RDD[(Int, Int)],
       dcBc: Broadcast[DerivativeCalculator],
       currentScores: Array[Double]): Double = {
     val sc = pdcRDD.context
     val currentScoresBc = sc.broadcast(currentScores)
-    val deltaDcg = pdcRDD.mapPartitions(iter => {
+    val sumErrors = pdcRDD.mapPartitions(iter => {
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
       iter.map(Function.tupled((qiMin, lcNumQueries) => {
-        dc.calcError(currentScores, qiMin, qiMin + lcNumQueries)
+        dc.getPartErrors(currentScores, qiMin, qiMin + lcNumQueries)
       }))
     }).sum()
     currentScoresBc.destroy(blocking=false)
-    deltaDcg
+    sumErrors
   }
 }
