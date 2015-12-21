@@ -7,7 +7,7 @@ import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.tree.configuration.Strategy
 import org.apache.spark.mllib.tree.impl._
-import org.apache.spark.mllib.tree.model.SplitInfo
+import org.apache.spark.mllib.tree.model.{Histogram, SplitInfo}
 import org.apache.spark.mllib.tree.model.impurity._
 import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
 import org.apache.spark.mllib.tree.model.node._
@@ -151,37 +151,30 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     timer.start("chooseSplits")
     val sc = trainingData.sparkContext
     val nodeNoTrackerBc = sc.broadcast(nodeNoTracker)
-    val nodesToSplitBc = sc.broadcast(nodesToSplit)
 
     val bestSplitsPerFeature = trainingData.mapPartitions(iter => {
       val lcNodeNoTracker = nodeNoTrackerBc.value
       val lcLambdas = lambdasBc.value
       val lcWeights = weightsBc.value
-      val lcNodesToSplit = nodesToSplitBc.value
       iter.map(Function.tupled((_, samples, splits) => {
-        val histograms = Array.fill(numNodes)(new FeatureStatsAggregator((splits.length + 1).toByte))
+        val numBins = splits.length + 1
+        val histograms = Array.fill(numNodes)(new Histogram(numBins))
 
         var si = 0
         while (si < samples.length) {
           val ni = lcNodeNoTracker(si)
           if (ni >= 0) {
-            histograms(ni).update(samples(si), lcLambdas(si), 1.0, lcWeights(si))
+            histograms(ni).update(samples(si), lcLambdas(si), lcWeights(si))
           }
           si += 1
         }
 
-        // TBD, make minInstancesPerNode, minInfoGain parameterized.
-        val minInstancesPerNode = 0
-        val minInfoGain = 0
-        Array.tabulate(numNodes)(ni => binsToBestSplit(histograms(ni), splits,
-          minInstancesPerNode, minInfoGain, lcNodesToSplit(ni))
-        )
+        Array.tabulate(numNodes)(ni => binsToBestSplit(histograms(ni), splits))
       }))
     })
 
     val bsf = betterSplits(numNodes)_
     val bestSplits = bestSplitsPerFeature.reduce(bsf)
-    nodesToSplitBc.destroy(blocking=false)
 
     timer.stop("chooseSplits")
 
@@ -190,7 +183,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     while (sni < numNodes) {
       val node = nodesToSplit(sni)
       val nodeId = node.id
-      val (split: SplitInfo, stats: InformationGainStats, predict: Predict) = bestSplits(sni)
+      val (split: SplitInfo, stats: InformationGainStats) = bestSplits(sni)
       logDebug("best split = " + split)
 
       splitfeatures += "I:" + split.feature.toString
@@ -199,7 +192,6 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 
       // Extract info for this node.  Create children if not leaf.
       val isLeaf = (stats.gain <= 0) || (Node.indexToLevel(nodeId) == maxDepth)
-      node.predict = predict
       node.isLeaf = isLeaf
       node.stats = Some(stats)
       node.impurity = stats.impurity
@@ -270,9 +262,9 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
   }
 
   def betterSplits(numNodes: Int)(
-      a: Array[(SplitInfo, InformationGainStats, Predict)],
-      b: Array[(SplitInfo, InformationGainStats, Predict)])
-  : Array[(SplitInfo, InformationGainStats, Predict)] = {
+      a: Array[(SplitInfo, InformationGainStats)],
+      b: Array[(SplitInfo, InformationGainStats)])
+  : Array[(SplitInfo, InformationGainStats)] = {
     Array.tabulate(numNodes)(ni => {
       val ai = a(ni)
       val bi = b(ni)
@@ -336,41 +328,37 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 
     (predict, impurity)
   }
-  
+
+  // TODO: make minInstancesPerNode, minInfoGain parameterized
   def binsToBestSplit(
-      featureStatsAggregates: FeatureStatsAggregator,
+      hist: Histogram,
       splits: Array[SplitInfo],
-      minInstancesPerNode: Int,
-      minInfoGain: Double,
-      node: Node): (SplitInfo, InformationGainStats, Predict) = {
-    // calculate predict and impurity if current node is top node
-    val level = Node.indexToLevel(node.id)
-    var predictWithImpurity: Option[(Predict, Double)] = if (level == 0) {
-      None
-    } else {
-      Some((node.predict, node.impurity))
-    }
-    
-    val numSplits = splits.length
-    var splitIndex = 0
-    while (splitIndex < numSplits) {
-      featureStatsAggregates.merge(splitIndex + 1, splitIndex)
-      splitIndex += 1
-    }
-
-    // Find best split.
-    val (bestFeatureSplitIndex, bestFeatureGainStats) =
-        Range(0, numSplits).map { case splitIdx =>
-        val leftChildStats = featureStatsAggregates.getImpurityCalculator(splitIdx)
-        val rightChildStats = featureStatsAggregates.getImpurityCalculator(numSplits)
-        rightChildStats.subtract(leftChildStats)
-        predictWithImpurity = Some(predictWithImpurity.getOrElse(
-          calculatePredictImpurity(leftChildStats, rightChildStats)))
-        val gainStats = calculateGainForSplit(leftChildStats, rightChildStats,
-          minInstancesPerNode, minInfoGain, predictWithImpurity.get._2)
-        (splitIdx, gainStats)
-      }.maxBy(_._2.gain)
-
-    (splits(bestFeatureSplitIndex), bestFeatureGainStats, predictWithImpurity.get._1)
+      minInstancesPerNode: Int = 1,
+      minGain: Double = Double.MinPositiveValue): (SplitInfo, InformationGainStats) = {
+    val cumHist = hist.cumulate()
+    val acnts = hist.counts.last
+    val ascores = hist.scores.last
+    val asquares = hist.squares.last
+    val impurity = (asquares - ascores * ascores / acnts) / acnts
+    splits.iterator.map(split => {
+      val thresh = split.threshold.toInt
+      val lcnts = cumHist.counts(thresh)
+      val lscores = cumHist.scores(thresh)
+      val rcnts = acnts - lcnts
+      val rscores = ascores - lscores
+      val gain = lscores * lscores / lcnts + rscores * rscores / rcnts
+      val gainStats = if (lcnts >= minInstancesPerNode && rcnts >= minInstancesPerNode && gain >= minGain) {
+        val lsquare = cumHist.squares(thresh)
+        val leftImpurity = (lsquare - lscores * lscores / lcnts) / lcnts
+        val rightImpurity = (asquares - lsquare - rscores * rscores / rcnts) / rcnts
+        val leftPridict = lscores / lcnts
+        val rightPridict = rscores / rcnts
+        new InformationGainStats(gain, impurity, leftImpurity, rightImpurity,
+          new Predict(leftPridict, -1), new Predict(rightPridict, -1))
+      } else {
+        InformationGainStats.invalidInformationGainStats
+      }
+      (split, gainStats)
+    }).maxBy(_._2.gain)
   }
 }

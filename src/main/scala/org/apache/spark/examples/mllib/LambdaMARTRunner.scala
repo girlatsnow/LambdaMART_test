@@ -140,16 +140,16 @@ object LambdaMARTRunner {
       path: String,
       minPartitions: Int): RDD[(Int, Array[Byte], Array[SplitInfo])] = {
     sc.textFile(path, minPartitions).map(line => {
-      val parts = line.split("#", 2)
-      val num = parts(0).toInt
-      val features = parts(1).split(',').map(_.toByte)
+      val parts = line.split("#")
+      val feat = parts(0).toInt
+      val samples = parts(1).split(',').map(_.toByte)
       val splits = if (parts.length > 2) {
-        parts(2).split(',').map(threshold => new SplitInfo(num, threshold.toDouble))
+        parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
       } else {
-        val max = math.max(0, features.max)
-        Array.tabulate(max)(threshold => new SplitInfo(num, threshold.toDouble))
+        val maxFeat = samples.max
+        Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
       }
-      (num, features, splits)
+      (feat, samples, splits)
     }).persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
   }
 

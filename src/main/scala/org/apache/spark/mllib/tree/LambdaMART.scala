@@ -91,6 +91,8 @@ object LambdaMART extends Logging {
     timer.stop("init")
 
     val currentScores = initScores
+    val initErrors = evaluateErrors(pdcRDD, dcBc, currentScores)
+    println(s"NDCG initError sum = $initErrors")
     var m = 0
     while (m < numIterations) {
       timer.start(s"building tree $m")
