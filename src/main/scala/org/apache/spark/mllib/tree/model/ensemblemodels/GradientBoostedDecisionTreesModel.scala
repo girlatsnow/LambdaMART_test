@@ -298,7 +298,7 @@ private[tree] sealed class TreeEnsembleModel(
       s"  NumInernalNodes=$numOfInternalNodes \n" +
       s"  SplitFeatures"+ tree.splitfeatures.foreach(feature => "$feature")
       s"  "
-     // tree.topNode.subtreeToString(4)      
+    // tree.topNode.subtreeToString(4)      
     }.fold("")(_ + _)
   }
 
@@ -401,7 +401,7 @@ private[tree] object TreeEnsembleModel extends Logging {
       val sqlContext = new SQLContext(sc)
       val nodes = sqlContext.read.parquet(datapath).map(TreeNodeData.apply)
       val trees = constructTrees(nodes)
-      trees.map(new OptimizedDecisionTreeModel(_, Algo.fromString(treeAlgo),null,null,null))
+      trees.map(new OptimizedDecisionTreeModel(_, Algo.fromString(treeAlgo),null,null,null,null))
     }
   }
 

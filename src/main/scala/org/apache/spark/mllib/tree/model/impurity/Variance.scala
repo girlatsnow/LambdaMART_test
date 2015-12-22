@@ -102,7 +102,7 @@ private[tree] class VarianceAggregator()
 private[tree] class VarianceCalculator(stats: Array[Double]) extends ImpurityCalculator(stats) {
 
   require(stats.size == 4,
-    s"VarianceCalculator requires sufficient statistics array stats to be of length 3," +
+    s"VarianceCalculator requires sufficient statistics array stats to be of length 4," +
     s" but was given array of length ${stats.size}.")
 
   /**

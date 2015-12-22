@@ -46,7 +46,7 @@ import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainSta
  */
 @Experimental
 class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeatures:mutable.MutableList[String],
-                                 var splitgain:mutable.MutableList[Double], var threshold:mutable.MutableList[Double])
+                                 var splitgain: mutable.MutableList[Double], var gainPValues: mutable.MutableList[Double], var threshold:mutable.MutableList[Double])
   extends Serializable with Saveable {
 
   /**
@@ -129,7 +129,7 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeat
 
 
 
-  def sequence(path: String, model: OptimizedDecisionTreeModel): Unit ={
+  def sequence(path: String, model: OptimizedDecisionTreeModel, modelId: Int): Unit ={
 
     import java.io.{File, PrintWriter, FileOutputStream}
       println(s"flag1")
@@ -138,19 +138,18 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeat
      val length = model.splitfeatures.length
     println(s"length:"+length)
 
-    pw.append(s"[Evaluaror]=").write("\r\n")
+    pw.append(s"[Evaluator:$modelId]").write("\r\n")
 
-    pw.append(s"EvaluarorType=DecisionTree").write("\r\n")
+    pw.append(s"EvaluatorType=DecisionTree").write("\r\n")
 
     val NumInternalNodes = topNode.internalNodes
     pw.append(s"NumInternalNodes=$NumInternalNodes").write("\r\n")
 
-    pw.append(s"SplitFeatures=").write("\t")
+    pw.append(s"SplitFeatures=").write("")
     model.splitfeatures.foreach {
       x =>
         pw.append(s"$x").write("\t")
     }
-
     pw.write("\r\n")
 
     pw.append(s"SplitGain=").write("")
@@ -158,36 +157,43 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeat
       x =>
         pw.append(s"$x").write("\t")
     }
-
     pw.write("\r\n")
+
+    pw.append(s"GainPValue=").write("")
+    model.gainPValues.foreach {
+      x =>
+        pw.append(s"$x").write("\t")
+    }
+    pw.write("\r\n")
+
     pw.append(s"LTEChild=").write("")
     Node.getLTENodes(topNode).foreach{
       x =>
         pw.append(s"$x").write("\t")
     }
-
     pw.write("\r\n")
+
     pw.append(s"GTChild=").write("")
     Node.getGTNodes(topNode).foreach{
       x =>
         pw.append(s"$x").write("\t")
     }
-
     pw.write("\r\n")
+
     pw.append(s"Threshold=").write("")
     model.threshold.foreach{
       x =>
         pw.append(s"$x").write("\t")
     }
-
     pw.write("\r\n")
+    
     pw.append(s"Output=").write("")
     Node.getOutput(topNode).foreach{
       x =>
         pw.append(s"$x").write("\t")
     }
 
-    pw.write("\r\n")
+    pw.append("\n").write("\n")
     pw.flush
     pw.close
 
@@ -271,7 +277,7 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeat
     val test3 = LTEChild.length
     println(s"test3:$test3")
     val rootNode = createRootNode(LTEChild,GTChild,splitfeatures,splitgain,threshold,output)
-    val model = new OptimizedDecisionTreeModel(rootNode,Algo.fromString(algo),splitfeatures,splitgain,threshold)
+    val model = new OptimizedDecisionTreeModel(rootNode,Algo.fromString(algo),splitfeatures,splitgain,gainPValues,threshold)
     model
   }
 
@@ -459,7 +465,7 @@ object OptimizedDecisionTreeModel extends Loader[OptimizedDecisionTreeModel] wit
         val trees = constructTrees(nodes)
         assert(trees.size == 1,
           "Decision tree should contain exactly one tree but got ${trees.size} trees.")
-        val model = new OptimizedDecisionTreeModel(trees(0), Algo.fromString(algo),null,null,null)
+        val model = new OptimizedDecisionTreeModel(trees(0), Algo.fromString(algo),null,null,null,null)
         assert(model.numNodes == numNodes, s"Unable to load OptimizedDecisionTreeModel data from: $datapath." +
           s" Expected $numNodes nodes but found ${model.numNodes}")
         model
@@ -510,7 +516,7 @@ object OptimizedDecisionTreeModel extends Loader[OptimizedDecisionTreeModel] wit
             val rightNode = constructNode(data.rightNodeId.get, dataMap, nodes)
             val stats = new InformationGainStats(data.infoGain.get, data.impurity, leftNode.impurity,
               rightNode.impurity, leftNode.predict, rightNode.predict)
-            new Node(data.nodeId, data.predict.toPredict, data.impurity, data.isLeaf,
+            new Node(data.nodeId, 0, data.predict.toPredict, data.impurity, data.isLeaf,
               data.split.map(_.toSplit), Some(leftNode), Some(rightNode), Some(stats))
           }
         nodes += node.id -> node

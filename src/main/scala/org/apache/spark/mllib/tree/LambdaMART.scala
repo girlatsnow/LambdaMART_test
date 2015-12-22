@@ -130,7 +130,7 @@ object LambdaMART extends Logging {
       val (model, residualScores, derivativeWeights) = new LambdaMARTDecisionTree(treeStrategy).run(trainingData, targetScores, labelScores, queryBoundy, weights)
       timer.stop(s"building tree $m")
       
-      model.sequence("D:\\spark-1.4.0-bin-hadoop2.6\\LambdaMART-v1\\dt.model", model)
+      model.sequence("D:\\spark-1.4.0-bin-hadoop2.6\\LambdaMART-v1\\dt.model", model, m + 1)
 
       baseLearners(m) = model
       baseLearnerWeights(m) = learningRate

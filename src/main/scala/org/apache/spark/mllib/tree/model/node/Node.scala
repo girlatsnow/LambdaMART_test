@@ -47,6 +47,7 @@ import scala.beans.BeanProperty
 class Node (
     // @BeanProperty 
     var id: Int,
+    var id2: Int,
     var predict: Predict,
     var impurity: Double,
     var isLeaf: Boolean,
@@ -124,7 +125,7 @@ class Node (
     } else {
       Some(rightNode.get.deepCopy())
     }
-    new Node(id, predict, impurity, isLeaf, split, leftNodeCopy, rightNodeCopy, stats)
+    new Node(id, id2, predict, impurity, isLeaf, split, leftNodeCopy, rightNodeCopy, stats)
   }
 
   /**
@@ -204,7 +205,7 @@ class Node (
   /**
    * Return a node with the given node id (but nothing else set).
    */
-  def emptyNode(nodeIndex: Int): Node = new Node(nodeIndex, new Predict(Double.MinValue), -1.0,
+  def emptyNode(nodeIndex: Int): Node = new Node(nodeIndex, 0, new Predict(Double.MinValue), -1.0,
     false, None, None, None, None)
 
   /**
@@ -223,7 +224,7 @@ class Node (
       predict: Predict,
       impurity: Double,
       isLeaf: Boolean): Node = {
-    new Node(nodeIndex, predict, impurity, isLeaf, None, None, None, None)
+    new Node(nodeIndex, 0, predict, impurity, isLeaf, None, None, None, None)
   }
 
   /**
@@ -293,7 +294,7 @@ class Node (
   }
   def getLTENodesHelper(node: Node,lteNodes: collection.mutable.MutableList[Int]): Unit ={
     if (!node.isLeaf){
-      lteNodes += node.leftNode.get.id
+      lteNodes += node.leftNode.get.id2
       getLTENodesHelper(node.leftNode.get,lteNodes)
       getLTENodesHelper(node.rightNode.get,lteNodes)
     }
@@ -306,7 +307,7 @@ class Node (
   }
   def getGTNodesHelper(node: Node,gtNodes: collection.mutable.MutableList[Int]): Unit ={
     if (!node.isLeaf){
-      gtNodes += node.rightNode.get.id
+      gtNodes += node.rightNode.get.id2
       getGTNodesHelper(node.leftNode.get,gtNodes)
       getGTNodesHelper(node.rightNode.get,gtNodes)
     }
