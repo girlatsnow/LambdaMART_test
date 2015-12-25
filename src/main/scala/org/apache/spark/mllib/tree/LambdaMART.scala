@@ -91,7 +91,7 @@ object LambdaMART extends Logging {
     timer.stop("init")
 
     val currentScores = initScores
-    val initErrors = evaluateErrors(pdcRDD, dcBc, currentScores)
+    val initErrors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
     println(s"NDCG initError sum = $initErrors")
     var m = 0
     while (m < numIterations) {
@@ -116,7 +116,7 @@ object LambdaMART extends Logging {
       Range(0, numSamples).par.foreach(si =>
         currentScores(si) -= learningRate * treeScores(si)
       )
-      val errors = evaluateErrors(pdcRDD, dcBc, currentScores)
+      val errors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
       println(s"NDCG error sum = $errors")
       // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
 
@@ -157,7 +157,8 @@ object LambdaMART extends Logging {
   def evaluateErrors(
       pdcRDD: RDD[(Int, Int)],
       dcBc: Broadcast[DerivativeCalculator],
-      currentScores: Array[Double]): Double = {
+      currentScores: Array[Double],
+      numQueries: Int): Double = {
     val sc = pdcRDD.context
     val currentScoresBc = sc.broadcast(currentScores)
     val sumErrors = pdcRDD.mapPartitions(iter => {
@@ -168,6 +169,6 @@ object LambdaMART extends Logging {
       }))
     }).sum()
     currentScoresBc.destroy(blocking=false)
-    sumErrors
+    sumErrors / numQueries
   }
 }

@@ -151,7 +151,7 @@ class DerivativeCalculator extends Serializable {
     var lambdaSum = 0.0
 
     // Should we still run the calculation on those pairs which are ostensibly the same?
-    val pairSame: Boolean = secondaryMetricShare != 0.0
+    val pairSame = secondaryMetricShare != 0.0
 
     // Did not help to use pointer match on pPermutation[i]
     for (odi <- 0 until numDocs)
