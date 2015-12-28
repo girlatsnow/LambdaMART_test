@@ -74,11 +74,11 @@ class DerivativeCalculator extends Serializable {
   }
 
   private def labelScoreSort(siMin: Int, siEnd: Int): Array[Short] = {
-    labelScores.view(siMin, siEnd).sortWith(_ > _).toArray
+    labelScores.view(siMin, siEnd).toSeq.sorted.reverse.toArray
   }
 
   private def docIdxSort(scores: Array[Double], siMin: Int, siEnd: Int): Array[Int] = {
-    Range(siMin, siEnd).sortWith(scores(_) > scores(_)).map(_ - siMin).toArray
+    Range(siMin, siEnd).sortBy(scores).map(_ - siMin).toArray
   }
 
   def getPartDerivatives(scores: Array[Double], qiMin: Int, qiEnd: Int): (Int, Array[Double], Array[Double]) = {
