@@ -18,10 +18,12 @@ import org.apache.spark.rdd.RDD
 
 class LambdaMARTDecisionTree(
     val strategy: Strategy,
+    val numLeaves: Int,
     val maxSplits: Int) extends Serializable with Logging {
 
   strategy.assertValid()
 
+  var curLeaves = 0
   val leafNo = Array(-1)
   val nonLeafNo = Array(1)
 
@@ -42,9 +44,11 @@ class LambdaMARTDecisionTree(
     // val maxMemoryUsage: Long = strategy.maxMemoryInMB * 1024L * 1024L
 
     // FIFO queue of nodes to train: node
-    val nodeQueue = new mutable.Queue[Node]()
+    implicit val nodeOrd = Ordering.by[Node, Double](_.impurity).reverse
+    val nodeQueue = new mutable.PriorityQueue[Node]
     val topNode = Node.emptyNode(nodeIndex=1)
     nodeQueue.enqueue(topNode)
+    curLeaves = 1
 
     // Create node Id tracker.
     // At first, all the samples belong to the root nodes (node Id == 1).
@@ -58,8 +62,8 @@ class LambdaMARTDecisionTree(
     val threshold = mutable.MutableList[Double]()
     val gainPValues = mutable.MutableList[Double]()
 
-    while (nodeQueue.nonEmpty) {
-      val (nodesToSplits, nodeId2NodeNo) = LambdaMARTDecisionTree.selectNodesToSplit(nodeQueue, maxSplits)
+    while (nodeQueue.nonEmpty && (numLeaves == 0 || curLeaves < numLeaves)) {
+      val (nodesToSplits, nodeId2NodeNo) = selectNodesToSplit(nodeQueue, maxSplits)
 
       Range(0, numSamples).par.foreach(si =>
         nodeNoTracker(si) = nodeId2NodeNo.getOrElse(nodeIdTracker(si), -1)
@@ -67,8 +71,9 @@ class LambdaMARTDecisionTree(
 
       // Choose node splits, and enqueue new nodes as needed.
       timer.start("findBestSplits")
+      val maxDepth = if (numLeaves > 0) 32 else strategy.maxDepth
       val newSplits = LambdaMARTDecisionTree.findBestSplits(trainingData, trainingData_T, lambdasBc, weightsBc,
-        strategy.maxDepth, nodesToSplits, nodeId2Score, nodeNoTracker, nodeQueue, timer,
+        maxDepth, nodesToSplits, nodeId2Score, nodeNoTracker, nodeQueue, timer,
         splitfeatures, splitgain, threshold, gainPValues, leafNo, nonLeafNo)
 
       newSplits.par.foreach(Function.tupled((siMin, lcNumSamples, splitIndc, isLeftChild) => {
@@ -86,6 +91,10 @@ class LambdaMARTDecisionTree(
       timer.stop("findBestSplits")
     }
 
+    while (nodeQueue.nonEmpty) {
+      nodeQueue.dequeue().isLeaf = true
+    }
+
     timer.stop("total")
 
     println("Internal timing for LambdaMARTDecisionTree:")
@@ -99,17 +108,14 @@ class LambdaMARTDecisionTree(
     val model = new OptimizedDecisionTreeModel(topNode, strategy.algo, splitfeatures, splitgain, gainPValues, threshold)
     (model, treeScores)
   }
-}
-
-object LambdaMARTDecisionTree extends Serializable with Logging {
 
   def selectNodesToSplit(
-      nodeQueue: mutable.Queue[Node],
+      nodeQueue: mutable.PriorityQueue[Node],
       maxSplits: Int): (Array[Node], Map[Int, Byte]) = {
     val mutableNodes = new mutable.ArrayBuffer[Node]()
     val mutableNodeId2NodeNo = new mutable.HashMap[Int, Byte]()
     var numNodes = 0
-    while (nodeQueue.nonEmpty && numNodes < maxSplits) {
+    while (nodeQueue.nonEmpty && numNodes < maxSplits && (numLeaves == 0 || curLeaves < numLeaves)) {
       val node = nodeQueue.dequeue()
       mutableNodes += node
       mutableNodeId2NodeNo(node.id) = numNodes.toByte
@@ -121,18 +127,21 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       //   mutableNodeId2NodeNo(node.id) = numNodes.toByte
       // }
       // memUsage += nodeMemUsage
+      curLeaves += 1
       numNodes += 1
     }
     assert(mutableNodes.nonEmpty, s"LambdaMARTDecisionTree selected empty nodes. Error for unknown reason.")
     // Convert mutable maps to immutable ones.
     (mutableNodes.toArray, mutableNodeId2NodeNo.toMap)
   }
+}
 
   //  def aggregateSizeForNode(): Long = {
   //    // SplitInfo num sum
   //    3 * 64 * 4096
   //  }
-  
+
+object LambdaMARTDecisionTree extends Serializable with Logging {
   def findBestSplits(
       trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
       trainingData_T: RDD[(Int, Array[Array[Byte]])],
@@ -142,7 +151,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       nodesToSplit: Array[Node],
       nodeId2Score: mutable.HashMap[Int, Double],
       nodeNoTracker: Array[Byte],
-      nodeQueue: mutable.Queue[Node],
+      nodeQueue: mutable.PriorityQueue[Node],
       timer: TimeTracker,
       splitfeatures: mutable.MutableList[String],
       splitgain: mutable.MutableList[Double],

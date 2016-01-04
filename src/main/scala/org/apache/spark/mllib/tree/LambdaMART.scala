@@ -15,6 +15,7 @@ import org.apache.spark.rdd.RDD
 
 class LambdaMART(
     val boostingStrategy: BoostingStrategy,
+    val numLeaves: Int,
     val maxSplits: Int) extends Serializable with Logging {
 
   def run(
@@ -27,7 +28,7 @@ class LambdaMART(
     algo match {
       case Regression =>
         LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,
-          boostingStrategy, maxSplits)
+          boostingStrategy, numLeaves, maxSplits)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by the implementation of LambdaMART.")
     }
@@ -43,8 +44,9 @@ object LambdaMART extends Logging {
       initScores: Array[Double],
       queryBoundy: Array[Int],
       boostingStrategy: BoostingStrategy,
+      numLeaves: Int,
       maxSplits: Int): GradientBoostedDecisionTreesModel = {
-    new LambdaMART(boostingStrategy, maxSplits)
+    new LambdaMART(boostingStrategy, numLeaves, maxSplits)
       .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
   }
   
@@ -55,6 +57,7 @@ object LambdaMART extends Logging {
       initScores: Array[Double],
       queryBoundy: Array[Int],
       boostingStrategy: BoostingStrategy,
+      numLeaves: Int,
       maxSplits: Int): GradientBoostedDecisionTreesModel = {
     val timer = new TimeTracker()
     timer.start("total")
@@ -104,7 +107,7 @@ object LambdaMART extends Logging {
 
       val lambdasBc = sc.broadcast(lambdas)
       val weightsBc = sc.broadcast(weights)
-      val tree = new LambdaMARTDecisionTree(treeStrategy, maxSplits)
+      val tree = new LambdaMARTDecisionTree(treeStrategy, numLeaves, maxSplits)
       val (model, treeScores) = tree.run(trainingData, trainingData_T, lambdasBc, weightsBc, numSamples)
       lambdasBc.destroy(blocking=false)
       weightsBc.destroy(blocking=false)
