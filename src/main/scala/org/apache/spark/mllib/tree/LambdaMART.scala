@@ -69,14 +69,14 @@ object LambdaMART extends Logging {
     val numIterations = boostingStrategy.numIterations
     val baseLearners = new Array[OptimizedDecisionTreeModel](numIterations)
     val baseLearnerWeights = new Array[Double](numIterations)
-    val loss = boostingStrategy.loss
+    // val loss = boostingStrategy.loss
     val learningRate = boostingStrategy.learningRate
     
     // Prepare strategy for individual trees, which use regression with variance impurity.
     val treeStrategy = boostingStrategy.treeStrategy.copy
-    val validationTol = boostingStrategy.validationTol
-    treeStrategy.algo = Regression
-    treeStrategy.impurity = Variance
+    // val validationTol = boostingStrategy.validationTol
+    treeStrategy.setAlgo(Regression)
+    treeStrategy.setImpurity(Variance)
     treeStrategy.assertValid()
 
     val sc= trainingData.sparkContext
@@ -144,17 +144,17 @@ object LambdaMART extends Logging {
       currentScoresBc: Broadcast[Array[Double]],
       lambdas: Array[Double],
       weights: Array[Double]): Unit = {
-    val partDerivs = pdcRDD.mapPartitions(iter => {
+    val partDerivs = pdcRDD.mapPartitions { iter =>
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
-      iter.map(Function.tupled((qiMin, lcNumQueries) => {
+      iter.map { case (qiMin, lcNumQueries) =>
         dc.getPartDerivatives(currentScores, qiMin, qiMin + lcNumQueries)
-      }))
-    }).collect()
-    partDerivs.par.foreach(Function.tupled((siMin, lcLambdas, lcWeights) => {
+      }
+    }.collect()
+    partDerivs.par.foreach { case (siMin, lcLambdas, lcWeights) =>
       Array.copy(lcLambdas, 0, lambdas, siMin, lcLambdas.length)
       Array.copy(lcWeights, 0, weights, siMin, lcWeights.length)
-    }))
+    }
   }
 
   def evaluateErrors(
@@ -164,13 +164,13 @@ object LambdaMART extends Logging {
       numQueries: Int): Double = {
     val sc = pdcRDD.context
     val currentScoresBc = sc.broadcast(currentScores)
-    val sumErrors = pdcRDD.mapPartitions(iter => {
+    val sumErrors = pdcRDD.mapPartitions { iter =>
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
-      iter.map(Function.tupled((qiMin, lcNumQueries) => {
+      iter.map { case (qiMin, lcNumQueries) =>
         dc.getPartErrors(currentScores, qiMin, qiMin + lcNumQueries)
-      }))
-    }).sum()
+      }
+    }.sum()
     currentScoresBc.destroy(blocking=false)
     sumErrors / numQueries
   }

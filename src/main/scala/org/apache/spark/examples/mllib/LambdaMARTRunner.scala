@@ -1,7 +1,5 @@
 package org.apache.spark.examples.mllib
 
-import scala.language.reflectiveCalls
-
 import org.apache.spark.mllib.tree.LambdaMART
 import org.apache.spark.mllib.tree.configuration._
 import org.apache.spark.mllib.tree.model.SplitInfo
@@ -10,6 +8,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
 import scopt.OptionParser
+
+import scala.language.reflectiveCalls
 
 
 object LambdaMARTRunner {
@@ -110,8 +110,8 @@ object LambdaMARTRunner {
       // val testData = MLUtils.loadLibSVMFile(sc, params.testData).cache()
 
       val boostingStrategy = BoostingStrategy.defaultParams(params.algo)
-      boostingStrategy.treeStrategy.maxDepth = params.maxDepth
-      boostingStrategy.numIterations = params.numIterations
+      boostingStrategy.treeStrategy.setMaxDepth(params.maxDepth)
+      boostingStrategy.setNumIterations(params.numIterations)
 
       if (params.algo == "Regression") {
         val startTime = System.nanoTime()
@@ -134,7 +134,7 @@ object LambdaMARTRunner {
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int)
   : RDD[(Int, Array[Byte], Array[SplitInfo])] = {
-    sc.textFile(path, minPartitions).map(line => {
+    sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
       val samples = parts(1).split(',').map(_.toByte)
@@ -145,7 +145,7 @@ object LambdaMARTRunner {
         Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
       }
       (feat, samples, splits)
-    }).persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
+    }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
   }
 
   def loadlabelScores(sc: SparkContext, path: String): Array[Short] = {
@@ -164,34 +164,34 @@ object LambdaMARTRunner {
   : RDD[(Int, Array[Array[Byte]])] = {
     println("generating transposed data...")
     // validate that the original data is ordered
-    val denseAsc = trainingData.mapPartitions(iter => {
+    val denseAsc = trainingData.mapPartitions { iter =>
       var prev = iter.next()._1
-      val remaining = iter.dropWhile(Function.tupled((fi, _, _) => {
+      val remaining = iter.dropWhile { case (fi, _, _) =>
         val goodNext = fi - prev == 1
         prev = fi
         goodNext
-      }))
+      }
       Iterator.single(!remaining.hasNext)
-    }).reduce(_ && _)
+    }.reduce(_ && _)
     assert(denseAsc, "the original data must be ordered.")
 
     val numPartitions = trainingData.partitions.length
     val (siMinPP, lcNumSamplesPP) = TreeUtils.getPartitionOffsets(numSamples, numPartitions)
-    val trainingData_T = trainingData.mapPartitions(iter => {
+    val trainingData_T = trainingData.mapPartitions { iter =>
       val (metaIter, dataIter) = iter.duplicate
       val fiMin = metaIter.next()._1
       val lcNumFeats = metaIter.length + 1
       val blocksPP = Array.tabulate(numPartitions)(pi => Array.ofDim[Byte](lcNumFeats, lcNumSamplesPP(pi)))
-      dataIter.foreach(Function.tupled((fi, samples, _) => {
+      dataIter.foreach { case (fi, samples, _) =>
         val lfi = fi - fiMin
         var pi = 0
         while (pi < numPartitions) {
           Array.copy(samples, siMinPP(pi), blocksPP(pi)(lfi), 0, lcNumSamplesPP(pi))
           pi += 1
         }
-      }))
+      }
       Range(0, numPartitions).iterator.map(pi => (pi, (fiMin, blocksPP(pi))))
-    }).partitionBy(new HashPartitioner(numPartitions)).mapPartitionsWithIndex((pid, iter) => {
+    }.partitionBy(new HashPartitioner(numPartitions)).mapPartitionsWithIndex((pid, iter) => {
       val siMin = siMinPP(pid)
       val sampleSlice = new Array[Array[Byte]](numFeats)
       iter.foreach { case (_, (fiMin, blocks)) =>
@@ -208,12 +208,12 @@ object LambdaMARTRunner {
   }
 
   /***
-  def meanSquaredError(
-      model: { def predict(features: Vector): Double },
-      data: RDD[LabeledPoint]): Double = {
-    data.map { y =>
-      val err = model.predict(y.features) - y.label
-      err * err
-    }.mean()
-  }***/
+    * def meanSquaredError(
+    * model: { def predict(features: Vector): Double },
+    * data: RDD[LabeledPoint]): Double = {
+    * data.map { y =>
+    * val err = model.predict(y.features) - y.label
+    * err * err
+    * }.mean()
+    * }***/
 }

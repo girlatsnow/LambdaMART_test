@@ -154,8 +154,7 @@ class DerivativeCalculator extends Serializable {
     val pairSame = secondaryMetricShare != 0.0
 
     // Did not help to use pointer match on pPermutation[i]
-    for (odi <- 0 until numDocs)
-    {
+    for (odi <- 0 until numDocs) {
       val di = permutation(odi)
       val sHigh = di + siMin
       val labelHigh = labels(sHigh)
