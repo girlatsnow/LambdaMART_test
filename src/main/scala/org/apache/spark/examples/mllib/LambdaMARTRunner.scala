@@ -1,5 +1,6 @@
 package org.apache.spark.examples.mllib
 
+import org.apache.hadoop.fs.Path
 import org.apache.spark.mllib.tree.LambdaMART
 import org.apache.spark.mllib.tree.configuration._
 import org.apache.spark.mllib.tree.model.SplitInfo
@@ -13,25 +14,23 @@ import scala.language.reflectiveCalls
 
 
 object LambdaMARTRunner {
-
-  case class Params(
-      trainingData: String = null,
-      testData: String = null,
-      labelScores: String = null,
-      initScores: String = null,
-      queryBoundy: String = null,
-      algo: String = "Regression",
-      maxDepth: Int = 8,
-      numLeaves: Int = 0,
-      numIterations: Int = 10,
-      maxSplits: Int = 128) extends AbstractParams[Params]
+  case class Params(trainingData: String = null,
+    testData: String = null,
+    queryBoundy: String = null,
+    modelOutput: String = null,
+    labelScores: String = null,
+    initScores: String = null,
+    algo: String = "Regression",
+    maxDepth: Int = 8,
+    numLeaves: Int = 0,
+    numIterations: Int = 10,
+    maxSplits: Int = 128) extends AbstractParams[Params]
 
   def main(args: Array[String]) {
-  
     val defaultParams = Params()
 
     val parser = new OptionParser[Params]("LambdaMART") {
-      head("LambdaMART: an implementation of LambdaMART for FastRank.")        
+      head("LambdaMART: an implementation of LambdaMART for FastRank.")
       opt[String]("trainingData")
         .text("trainingData path")
         .required()
@@ -39,18 +38,22 @@ object LambdaMARTRunner {
       opt[String]("testData")
         .text("testData path")
         .required()
-        .action((x, c) => c.copy(testData = x))        
+        .action((x, c) => c.copy(testData = x))
+      opt[String]("queryBoundy")
+        .text("queryBoundy path")
+        .required()
+        .action((x, c) => c.copy(queryBoundy = x))
+      opt[String]("modelOutput")
+        .text("modelOutput path")
+        .required()
+        .action((x, c) => c.copy(modelOutput = x))
       opt[String]("labelScores")
         .text("labelScores path to training dataset")
         .required()
         .action((x, c) => c.copy(labelScores = x))
       opt[String]("initScores")
         .text(s"initScores path to training dataset. If not given, initScores will be {0 ...}.")
-        .action((x, c) => c.copy(initScores = x))  
-      opt[String]("queryBoundy")
-        .text("queryBoundy path")
-        .required()
-        .action((x, c) => c.copy(queryBoundy = x))       
+        .action((x, c) => c.copy(initScores = x))
       opt[String]("algo")
         .text(s"algorithm (${Algo.values.mkString(",")}), default: ${defaultParams.algo}")
         .action((x, c) => c.copy(algo = x))
@@ -110,8 +113,8 @@ object LambdaMARTRunner {
       // val testData = MLUtils.loadLibSVMFile(sc, params.testData).cache()
 
       val boostingStrategy = BoostingStrategy.defaultParams(params.algo)
-      boostingStrategy.treeStrategy.setMaxDepth(params.maxDepth)
-      boostingStrategy.setNumIterations(params.numIterations)
+      boostingStrategy.treeStrategy.maxDepth = params.maxDepth
+      boostingStrategy.numIterations = params.numIterations
 
       if (params.algo == "Regression") {
         val startTime = System.nanoTime()
@@ -119,6 +122,11 @@ object LambdaMARTRunner {
           boostingStrategy, params.numLeaves, params.maxSplits)
         val elapsedTime = (System.nanoTime() - startTime) / 1e9
         println(s"Training time: $elapsedTime seconds")
+
+        val outPath = new Path(params.modelOutput)
+        val fs = TreeUtils.getFileSystem(trainingData.context.getConf, outPath)
+        fs.copyFromLocalFile(true, true, new Path("dt.model"), outPath)
+
         if (model.totalNumNodes < 30) {
           println(model.toDebugString) // Print full model.
         } else {
@@ -160,8 +168,9 @@ object LambdaMARTRunner {
     sc.textFile(path).first().split(',').map(_.toInt)
   }
 
-  def genTransposedData(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])], numFeats: Int, numSamples: Int)
-  : RDD[(Int, Array[Array[Byte]])] = {
+  def genTransposedData(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    numFeats: Int,
+    numSamples: Int): RDD[(Int, Array[Array[Byte]])] = {
     println("generating transposed data...")
     // validate that the original data is ordered
     val denseAsc = trainingData.mapPartitions { iter =>

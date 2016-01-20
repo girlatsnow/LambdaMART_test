@@ -15,10 +15,9 @@ import scala.collection.immutable.BitSet
 import scala.collection.mutable
 
 
-class LambdaMARTDecisionTree(
-    val strategy: Strategy,
-    val numLeaves: Int,
-    val maxSplits: Int) extends Serializable with Logging {
+class LambdaMARTDecisionTree(val strategy: Strategy,
+  val numLeaves: Int,
+  val maxSplits: Int) extends Serializable with Logging {
 
   strategy.assertValid()
 
@@ -26,12 +25,11 @@ class LambdaMARTDecisionTree(
   val leafNo = Array(-1)
   val nonLeafNo = Array(1)
 
-  def run(
-      trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-      trainingData_T: RDD[(Int, Array[Array[Byte]])],
-      lambdasBc: Broadcast[Array[Double]],
-      weightsBc: Broadcast[Array[Double]],
-      numSamples: Int): (OptimizedDecisionTreeModel, Array[Double]) = {
+  def run(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+    lambdasBc: Broadcast[Array[Double]],
+    weightsBc: Broadcast[Array[Double]],
+    numSamples: Int): (OptimizedDecisionTreeModel, Array[Double]) = {
 
     val timer = new TimeTracker()
 
@@ -109,9 +107,8 @@ class LambdaMARTDecisionTree(
     (model, treeScores)
   }
 
-  def selectNodesToSplit(
-      nodeQueue: mutable.PriorityQueue[Node],
-      maxSplits: Int): (Array[Node], Map[Int, Byte]) = {
+  def selectNodesToSplit(nodeQueue: mutable.PriorityQueue[Node],
+    maxSplits: Int): (Array[Node], Map[Int, Byte]) = {
     val mutableNodes = new mutable.ArrayBuffer[Node]()
     val mutableNodeId2NodeNo = new mutable.HashMap[Int, Byte]()
     var numNodes = 0
@@ -142,23 +139,22 @@ class LambdaMARTDecisionTree(
   //  }
 
 object LambdaMARTDecisionTree extends Serializable with Logging {
-  def findBestSplits(
-      trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-      trainingData_T: RDD[(Int, Array[Array[Byte]])],
-      lambdasBc: Broadcast[Array[Double]],
-      weightsBc: Broadcast[Array[Double]],
-      maxDepth: Int,
-      nodesToSplit: Array[Node],
-      nodeId2Score: mutable.HashMap[Int, Double],
-      nodeNoTracker: Array[Byte],
-      nodeQueue: mutable.PriorityQueue[Node],
-      timer: TimeTracker,
-      splitfeatures: mutable.MutableList[String],
-      splitgain: mutable.MutableList[Double],
-      gainPValues: mutable.MutableList[Double],
-      threshold: mutable.MutableList[Double],
-      leafNo: Array[Int],
-      nonLeafNo: Array[Int]): Array[(Int, Int, BitSet, BitSet)] = {
+  def findBestSplits(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+    lambdasBc: Broadcast[Array[Double]],
+    weightsBc: Broadcast[Array[Double]],
+    maxDepth: Int,
+    nodesToSplit: Array[Node],
+    nodeId2Score: mutable.HashMap[Int, Double],
+    nodeNoTracker: Array[Byte],
+    nodeQueue: mutable.PriorityQueue[Node],
+    timer: TimeTracker,
+    splitfeatures: mutable.MutableList[String],
+    splitgain: mutable.MutableList[Double],
+    gainPValues: mutable.MutableList[Double],
+    threshold: mutable.MutableList[Double],
+    leafNo: Array[Int],
+    nonLeafNo: Array[Int]): Array[(Int, Int, BitSet, BitSet)] = {
     // numNodes:  Number of nodes in this group
     val numNodes = nodesToSplit.length
     println("numNodes = " + numNodes)
@@ -295,9 +291,8 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     newSplits
   }
 
-  def betterSplits(numNodes: Int)(
-      a: Array[(SplitInfo, InformationGainStats, Double)],
-      b: Array[(SplitInfo, InformationGainStats, Double)])
+  def betterSplits(numNodes: Int)(a: Array[(SplitInfo, InformationGainStats, Double)],
+    b: Array[(SplitInfo, InformationGainStats, Double)])
   : Array[(SplitInfo, InformationGainStats, Double)] = {
     Array.tabulate(numNodes){ ni =>
       val ai = a(ni)
@@ -364,11 +359,10 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 //  }
 
   // TODO: make minInstancesPerNode, minInfoGain parameterized
-  def binsToBestSplit(
-      hist: Histogram,
-      splits: Array[SplitInfo],
-      minInstancesPerNode: Int = 1,
-      minGain: Double = Double.MinPositiveValue): (SplitInfo, InformationGainStats, Double) = {
+  def binsToBestSplit(hist: Histogram,
+    splits: Array[SplitInfo],
+    minInstancesPerNode: Int = 1,
+    minGain: Double = Double.MinPositiveValue): (SplitInfo, InformationGainStats, Double) = {
     val cumHist = hist.cumulate()
     val totalCnts = hist.counts.last
     val totalSumScores = hist.scores.last

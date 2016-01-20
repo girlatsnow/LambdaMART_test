@@ -13,17 +13,14 @@ import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
 
 
-class LambdaMART(
-    val boostingStrategy: BoostingStrategy,
-    val numLeaves: Int,
-    val maxSplits: Int) extends Serializable with Logging {
-
-  def run(
-      trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-      trainingData_T: RDD[(Int, Array[Array[Byte]])],
-      labelScores: Array[Short],
-      initScores: Array[Double],
-      queryBoundy: Array[Int]): GradientBoostedDecisionTreesModel = {
+class LambdaMART(val boostingStrategy: BoostingStrategy,
+  val numLeaves: Int,
+  val maxSplits: Int) extends Serializable with Logging {
+  def run(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+    labelScores: Array[Short],
+    initScores: Array[Double],
+    queryBoundy: Array[Int]): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
     algo match {
       case Regression =>
@@ -36,29 +33,26 @@ class LambdaMART(
 }
 
 object LambdaMART extends Logging {
-
-  def train(
-      trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-      trainingData_T: RDD[(Int, Array[Array[Byte]])],
-      labelScores: Array[Short],
-      initScores: Array[Double],
-      queryBoundy: Array[Int],
-      boostingStrategy: BoostingStrategy,
-      numLeaves: Int,
-      maxSplits: Int): GradientBoostedDecisionTreesModel = {
+  def train(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+    labelScores: Array[Short],
+    initScores: Array[Double],
+    queryBoundy: Array[Int],
+    boostingStrategy: BoostingStrategy,
+    numLeaves: Int,
+    maxSplits: Int): GradientBoostedDecisionTreesModel = {
     new LambdaMART(boostingStrategy, numLeaves, maxSplits)
       .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
   }
   
-  private def boost(
-      trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-      trainingData_T: RDD[(Int, Array[Array[Byte]])],
-      labelScores: Array[Short],
-      initScores: Array[Double],
-      queryBoundy: Array[Int],
-      boostingStrategy: BoostingStrategy,
-      numLeaves: Int,
-      maxSplits: Int): GradientBoostedDecisionTreesModel = {
+  private def boost(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+    labelScores: Array[Short],
+    initScores: Array[Double],
+    queryBoundy: Array[Int],
+    boostingStrategy: BoostingStrategy,
+    numLeaves: Int,
+    maxSplits: Int): GradientBoostedDecisionTreesModel = {
     val timer = new TimeTracker()
     timer.start("total")
     timer.start("init")
@@ -75,8 +69,8 @@ object LambdaMART extends Logging {
     // Prepare strategy for individual trees, which use regression with variance impurity.
     val treeStrategy = boostingStrategy.treeStrategy.copy
     // val validationTol = boostingStrategy.validationTol
-    treeStrategy.setAlgo(Regression)
-    treeStrategy.setImpurity(Variance)
+    treeStrategy.algo = Regression
+    treeStrategy.impurity = Variance
     treeStrategy.assertValid()
 
     val sc= trainingData.sparkContext
@@ -138,12 +132,11 @@ object LambdaMART extends Logging {
     new GradientBoostedDecisionTreesModel(Regression, baseLearners, baseLearnerWeights)
   }
 
-  def updateDerivatives(
-      pdcRDD: RDD[(Int, Int)],
-      dcBc: Broadcast[DerivativeCalculator],
-      currentScoresBc: Broadcast[Array[Double]],
-      lambdas: Array[Double],
-      weights: Array[Double]): Unit = {
+  def updateDerivatives(pdcRDD: RDD[(Int, Int)],
+    dcBc: Broadcast[DerivativeCalculator],
+    currentScoresBc: Broadcast[Array[Double]],
+    lambdas: Array[Double],
+    weights: Array[Double]): Unit = {
     val partDerivs = pdcRDD.mapPartitions { iter =>
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
@@ -157,11 +150,10 @@ object LambdaMART extends Logging {
     }
   }
 
-  def evaluateErrors(
-      pdcRDD: RDD[(Int, Int)],
-      dcBc: Broadcast[DerivativeCalculator],
-      currentScores: Array[Double],
-      numQueries: Int): Double = {
+  def evaluateErrors(pdcRDD: RDD[(Int, Int)],
+    dcBc: Broadcast[DerivativeCalculator],
+    currentScores: Array[Double],
+    numQueries: Int): Double = {
     val sc = pdcRDD.context
     val currentScoresBc = sc.broadcast(currentScores)
     val sumErrors = pdcRDD.mapPartitions { iter =>
