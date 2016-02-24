@@ -125,7 +125,7 @@ object LambdaMARTRunner {
 
         val outPath = new Path(params.modelOutput)
         val fs = TreeUtils.getFileSystem(trainingData.context.getConf, outPath)
-        fs.copyFromLocalFile(true, true, new Path("dt.model"), outPath)
+        fs.copyFromLocalFile(true, true, new Path("treeEnsemble.ini"), outPath)
 
         if (model.totalNumNodes < 30) {
           println(model.toDebugString) // Print full model.
@@ -141,11 +141,11 @@ object LambdaMARTRunner {
   }
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int)
-  : RDD[(Int, Array[Byte], Array[SplitInfo])] = {
+  : RDD[(Int, Array[Short], Array[SplitInfo])] = {
     sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
-      val samples = parts(1).split(',').map(_.toByte)
+      val samples = parts(1).split(',').map(_.toShort)
       val splits = if (parts.length > 2) {
         parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
       } else {
@@ -168,9 +168,23 @@ object LambdaMARTRunner {
     sc.textFile(path).first().split(',').map(_.toInt)
   }
 
-  def genTransposedData(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
+  def loadThresholdMap(sc: SparkContext, path: String, numFeats: Int): Array[Array[Double]] = {
+    val thresholdMapTuples = sc.textFile(path).map { line =>
+      val fields = line.split("#", 2)
+      (fields(0).toInt, fields(1).split(',').map(_.toDouble))
+    }.collect()
+    val numFeatsTM = thresholdMapTuples.length
+    assert(numFeats == numFeatsTM, s"ThresholdMap file contains $numFeatsTM features that != $numFeats")
+    val thresholdMap = new Array[Array[Double]](numFeats)
+    thresholdMapTuples.foreach { case (fi, thresholds) =>
+      thresholdMap(fi) = thresholds
+    }
+    thresholdMap
+  }
+
+  def genTransposedData(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
     numFeats: Int,
-    numSamples: Int): RDD[(Int, Array[Array[Byte]])] = {
+    numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
     println("generating transposed data...")
     // validate that the original data is ordered
     val denseAsc = trainingData.mapPartitions { iter =>
@@ -190,7 +204,7 @@ object LambdaMARTRunner {
       val (metaIter, dataIter) = iter.duplicate
       val fiMin = metaIter.next()._1
       val lcNumFeats = metaIter.length + 1
-      val blocksPP = Array.tabulate(numPartitions)(pi => Array.ofDim[Byte](lcNumFeats, lcNumSamplesPP(pi)))
+      val blocksPP = Array.tabulate(numPartitions)(pi => Array.ofDim[Short](lcNumFeats, lcNumSamplesPP(pi)))
       dataIter.foreach { case (fi, samples, _) =>
         val lfi = fi - fiMin
         var pi = 0
@@ -202,7 +216,7 @@ object LambdaMARTRunner {
       Range(0, numPartitions).iterator.map(pi => (pi, (fiMin, blocksPP(pi))))
     }.partitionBy(new HashPartitioner(numPartitions)).mapPartitionsWithIndex((pid, iter) => {
       val siMin = siMinPP(pid)
-      val sampleSlice = new Array[Array[Byte]](numFeats)
+      val sampleSlice = new Array[Array[Short]](numFeats)
       iter.foreach { case (_, (fiMin, blocks)) =>
         var lfi = 0
         while (lfi < blocks.length) {

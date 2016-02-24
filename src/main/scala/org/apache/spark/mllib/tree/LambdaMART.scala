@@ -9,15 +9,15 @@ import org.apache.spark.mllib.tree.impurity.Variance
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
-import org.apache.spark.mllib.util.TreeUtils
+import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
 import org.apache.spark.rdd.RDD
 
 
 class LambdaMART(val boostingStrategy: BoostingStrategy,
   val numLeaves: Int,
   val maxSplits: Int) extends Serializable with Logging {
-  def run(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+  def run(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int]): GradientBoostedDecisionTreesModel = {
@@ -33,8 +33,8 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
 }
 
 object LambdaMART extends Logging {
-  def train(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+  def train(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int],
@@ -45,8 +45,8 @@ object LambdaMART extends Logging {
       .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
   }
   
-  private def boost(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+  private def boost(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int],
@@ -117,10 +117,12 @@ object LambdaMART extends Logging {
       println(s"NDCG error sum = $errors")
       // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
 
-      model.sequence("dt.model", model, m + 1)
+      model.sequence("treeEnsemble.ini", model, m + 1)
       m += 1
     }
 
+    val evalNodes = Array.tabulate[Int](m)(_ + 1)
+    treeAggregatorFormat.appendTreeAggregator("treeEnsemble.ini", m + 1, evalNodes)
     timer.stop("total")
 
     println("Internal timing for LambdaMARTDecisionTree:")

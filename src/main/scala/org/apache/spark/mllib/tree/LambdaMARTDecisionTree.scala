@@ -9,6 +9,7 @@ import org.apache.spark.mllib.tree.model.node._
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
 import org.apache.spark.mllib.tree.model.predict.Predict
 import org.apache.spark.mllib.tree.model.{Histogram, SplitInfo}
+import org.apache.spark.mllib.util.ProbabilityFunctions
 import org.apache.spark.rdd.RDD
 
 import scala.collection.immutable.BitSet
@@ -25,8 +26,8 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
   val leafNo = Array(-1)
   val nonLeafNo = Array(1)
 
-  def run(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+  def run(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
     numSamples: Int): (OptimizedDecisionTreeModel, Array[Double]) = {
@@ -72,7 +73,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       val maxDepth = if (numLeaves > 0) 32 else strategy.maxDepth
       val newSplits = LambdaMARTDecisionTree.findBestSplits(trainingData, trainingData_T, lambdasBc, weightsBc,
         maxDepth, nodesToSplits, nodeId2Score, nodeNoTracker, nodeQueue, timer,
-        splitfeatures, splitgain, threshold, gainPValues, leafNo, nonLeafNo)
+        splitfeatures, splitgain, gainPValues, threshold, leafNo, nonLeafNo)
 
       newSplits.par.foreach { case (siMin, lcNumSamples, splitIndc, isLeftChild) =>
         var lsi = 0
@@ -139,8 +140,8 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
   //  }
 
 object LambdaMARTDecisionTree extends Serializable with Logging {
-  def findBestSplits(trainingData: RDD[(Int, Array[Byte], Array[SplitInfo])],
-    trainingData_T: RDD[(Int, Array[Array[Byte]])],
+  def findBestSplits(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+    trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
     maxDepth: Int,
@@ -168,7 +169,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       val lcNodeNoTracker = nodeNoTrackerBc.value
       val lcLambdas = lambdasBc.value
       val lcWeights = weightsBc.value
-      iter.map { case  (_, samples, splits) =>
+      iter.map { case (_, samples, splits) =>
         val numBins = splits.length + 1
         val histograms = Array.fill(numNodes)(new Histogram(numBins))
 
@@ -364,84 +365,113 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     minInstancesPerNode: Int = 1,
     minGain: Double = Double.MinPositiveValue): (SplitInfo, InformationGainStats, Double) = {
     val cumHist = hist.cumulate()
-    val totalCnts = hist.counts.last
-    val totalSumScores = hist.scores.last
-    val totalSumWeights = hist.scoreWeights.last
-    val totalSumSquares = hist.squares.last
-    val impurity = (totalSumSquares - totalSumScores * totalSumScores / totalCnts) / totalCnts
+    val totalDocInNode = cumHist.counts.last.toInt
+    val sumTargets = cumHist.scores.last
+    val sumWeight = cumHist.scoreWeights.last
+    val sumSquares = cumHist.squares.last
+    // val impurity = (sumSquares - sumTargets * sumTargets / totalDocInNode) / totalDocInNode
 
-    val denom = if (totalSumWeights == 0.0) totalCnts else totalSumWeights
-    val varianceTargets = (totalSumSquares - totalSumScores / denom) / (denom - 1)
+    val denom = if (sumWeight == 0.0) totalDocInNode else sumWeight
+    val varianceTargets = (sumSquares - sumTargets / denom) / (denom - 1)
     val eps = 1e-10
-    val gainShift = getLeafSplitGain(totalCnts, totalSumScores, totalSumWeights + 2 * eps)
+    val gainShift = getLeafSplitGain(totalDocInNode, sumTargets, sumWeight + 2 * eps)
+    val gainConfidenceLevel = 0.95
+    var gainConfidenceInSquaredStandardDeviations = ProbabilityFunctions.Probit(1.0 -(1.0 - gainConfidenceLevel)*0.5)
+    gainConfidenceInSquaredStandardDeviations *= gainConfidenceInSquaredStandardDeviations
+
+    val entropyCoefficient = 0.1 // an outer tuning parameters
+//    val minShiftedGain = if (gainConfidenceInSquaredStandardDeviations <= 0) 0.0
+//      else (gainConfidenceInSquaredStandardDeviations * varianceTargets *
+//        totalDocInNode / (totalDocInNode - 1) + gainShift)
+    var bestLteCount = -1
+    var bestLteTarget = Double.NaN
+    var bestLteWeight = Double.NaN
+    var bestLteSquaredTarget = Double.NaN
     var bestShiftedGain = Double.NegativeInfinity
+    var bestThreshold = 0
+    val feature = splits(0).feature
 
-    val res = splits.iterator.map { split =>
+    for (split <- splits) {
       val thresh = split.threshold.toInt
-      val lcnts = cumHist.counts(thresh)
-      val lscores = cumHist.scores(thresh)
-      var lscoreWeights = cumHist.scoreWeights(thresh)
-      val rcnts = totalCnts - lcnts
-      val rscores = totalSumScores - lscores
-      var rscoreWeights = totalSumWeights - lscoreWeights
-      if (lscoreWeights <= 0.0) {
-        lscoreWeights = lcnts
-      }
-      if (rscoreWeights <= 0.0) {
-        rscoreWeights = rcnts
-      }
-      val gain = lscores * lscores / lcnts + rscores * rscores / rcnts
-      val gainStats = if (lcnts >= minInstancesPerNode && rcnts >= minInstancesPerNode && gain >= minGain) {
-        val lsquare = cumHist.squares(thresh)
-        val leftImpurity = (lsquare - lscores * lscores / lcnts) / lcnts
-        val rightImpurity = (totalSumSquares - lsquare - rscores * rscores / rcnts) / rcnts
-        val leftPridict = lscores / lscoreWeights
-        val rightPridict = rscores / rscoreWeights
+      val lteCount = cumHist.counts(thresh).toInt
 
-        val currentShiftedGain = getLeafSplitGain(lcnts, lscores, lscoreWeights) +
-          getLeafSplitGain(rcnts, rscores, rscoreWeights)
+      // if(lcnts < minInstancesPerNode)  //TODO  pass this loop
+      val lteSumTarget = cumHist.scores(thresh)
+      val lteSumWeight = cumHist.scoreWeights(thresh)
+      val rtCount = totalDocInNode - lteCount
+      // if(rcnts < minInstancesPerNode)  // TODO break
+      val rtSumTarget = sumTargets - lteSumTarget
+      val rtSumWeight = sumWeight - lteSumWeight
 
-        if (currentShiftedGain > bestShiftedGain) {
-          bestShiftedGain = currentShiftedGain
+      /**
+        * if (lscoreWeights <= 0.0) {
+        * lscoreWeights = lcnts
+        * }
+        * if (rscoreWeights <= 0.0) {
+        * rscoreWeights = rcnts
+        * }**/
+
+      // val gain = lscores * lscores / lcnts + rscores * rscores / rcnts  gainShift >= minShiftedGain
+      if (lteCount >= minInstancesPerNode && rtCount >= minInstancesPerNode) {
+        var currentShiftedGain = getLeafSplitGain(lteCount, lteSumTarget, lteSumWeight) +
+          getLeafSplitGain(rtCount, rtSumTarget, rtSumWeight)
+
+        if (entropyCoefficient > 0) {
+          val entropyGain = totalDocInNode * math.log(totalDocInNode) - lteCount * math.log(lteCount) -
+            rtCount * math.log(rtCount)
+          currentShiftedGain += entropyCoefficient * entropyGain
         }
 
-        new InformationGainStats(gain, impurity, leftImpurity, rightImpurity,
-          new Predict(leftPridict, -1), new Predict(rightPridict, -1))
-      } else {
-        InformationGainStats.invalidInformationGainStats
+        if (currentShiftedGain > bestShiftedGain) {
+          bestLteCount = lteCount
+          bestLteTarget = lteSumTarget
+          bestLteWeight = lteSumWeight
+          bestLteSquaredTarget = cumHist.squares(thresh)
+          bestShiftedGain = currentShiftedGain
+          bestThreshold = thresh
+        }
       }
-      (split, gainStats)
-    }.maxBy(_._2.gain)
-
-    val erfcArg = scala.math.sqrt((bestShiftedGain - gainShift) * (totalCnts - 1) / (2 * varianceTargets * totalCnts))
-    val gainPValue = erfc(erfcArg)
-
-    (res._1, res._2, gainPValue)
-  }
-
-  //The approximate complimentary error function (i.e., 1-erf).
-  def erfc(x: Double): Double = {
-    if (x.isInfinity) {
-      if(x.isPosInfinity) 1.0 else -1.0
-    } else {
-      val p = 0.3275911
-      val a1 = 0.254829592
-      val a2 = -0.284496736
-      val a3 = 1.421413741
-      val a4 = -1.453152027
-      val a5 = 1.061405429
-
-      val t = 1.0 / (1.0 + p * math.abs(x))
-      val ev = 1.0 -  ((((((((a5 * t) + a4) * t) + a3) * t) + a2) * t + a1) * t) * math.exp(-(x * x))
-      if (x >= 0) ev else -ev
     }
+    val gtSquares = sumSquares - bestLteSquaredTarget
+    val gtTarget = sumTargets - bestLteTarget
+    val gtCount = totalDocInNode - bestLteCount
+
+    val lteImpurity = (bestLteSquaredTarget - bestLteTarget * bestLteTarget / bestLteCount) / bestLteCount
+    val gtImpurity = (gtSquares- gtTarget * gtTarget / gtCount) / gtCount
+    val tolImpurity = (sumSquares - sumTargets * sumTargets / totalDocInNode) / totalDocInNode
+
+    val bestSplitInfo = new SplitInfo(feature, bestThreshold.toDouble)
+    val lteOutput = CalculateSplittedLeafOutput(bestLteCount, bestLteTarget, bestLteWeight)
+    val gtOutput = CalculateSplittedLeafOutput(totalDocInNode - bestLteCount, sumTargets - bestLteTarget, sumWeight - bestLteWeight)
+    val ltePredict = new Predict(lteOutput)
+    val gtPredict = new Predict(gtOutput)
+
+    val trust = 1.0
+    //println("#############################################################################################")
+    //println(s"bestShiftedGain: $bestShiftedGain, gainShift: $gainShift")
+    val splitGain = (bestShiftedGain - gainShift) * trust //- usePenalty //TODO introduce trust and usePenalty
+    val inforGainStat = new InformationGainStats(splitGain, tolImpurity, lteImpurity, gtImpurity, ltePredict, gtPredict)
+    val erfcArg = math.sqrt((bestShiftedGain - gainShift) * (totalDocInNode - 1) / (2 * varianceTargets * totalDocInNode))
+    val gainPValue = ProbabilityFunctions.erfc(erfcArg)
+    (bestSplitInfo, inforGainStat, gainPValue)
   }
 
-  def getLeafSplitGain(count: Double, score: Double, weight: Double): Double = {
-    if (weight == 0.0) {
-      score * score / count
+  def getLeafSplitGain(count: Double, target: Double, weight: Double): Double = {
+    val pesuedCount = if(weight == 0.0) count else weight
+    target*target / pesuedCount
+  }
+
+  def CalculateSplittedLeafOutput(totalCount: Int, sumTargets: Double, sumWeights: Double): Double = {
+    val hasWeight = false
+    val bsrMaxTreeOutput = 100.0
+    if(!hasWeight){ //TODO hasweight true or false
+      sumTargets / totalCount
     } else {
-      score * score / weight
+      if (bsrMaxTreeOutput < 0.0) {  //TODO  bsrMaxTreeOutput default 100
+        sumTargets / sumWeights
+      } else {
+        sumTargets / (2 * sumWeights)
+      }
     }
   }
 }

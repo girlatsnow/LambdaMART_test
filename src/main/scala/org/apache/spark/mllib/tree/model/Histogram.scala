@@ -22,14 +22,12 @@ class Histogram(val numBins: Int) {
   }
 
   def cumulate() = {
-    var prevBin = 0
     var bin = 1
     while (bin < numBins) {
-      _counts(bin) += _counts(prevBin)
-      _scores(bin) += _scores(prevBin)
-      _squares(bin) += _squares(prevBin)
-      _scoreWeights(bin) += _scoreWeights(prevBin)
-      prevBin = bin
+      _counts(bin) += _counts(bin-1)
+      _scores(bin) += _scores(bin-1)
+      _squares(bin) += _squares(bin-1)
+      _scoreWeights(bin) += _scoreWeights(bin-1)
       bin += 1
     }
     this
