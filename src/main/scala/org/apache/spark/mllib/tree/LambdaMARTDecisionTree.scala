@@ -2,6 +2,7 @@ package org.apache.spark.mllib.tree
 
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.mllib.linalg.SparseVector
 import org.apache.spark.mllib.tree.configuration.Strategy
 import org.apache.spark.mllib.tree.impl._
 import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
@@ -26,11 +27,11 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
   val leafNo = Array(-1)
   val nonLeafNo = Array(1)
 
-  def run(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  def run(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
-    numSamples: Int): (OptimizedDecisionTreeModel, Array[Double]) = {
+    numSamples: Int) = {
 
     val timer = new TimeTracker()
 
@@ -143,7 +144,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
   //  }
 
 object LambdaMARTDecisionTree extends Serializable with Logging {
-  def findBestSplits(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  def findBestSplits(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
@@ -175,20 +176,27 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       val lcLambdas = lambdasBc.value
       val lcWeights = weightsBc.value
       val lcNodesInfo = nodesInfoBc.value
-      iter.map { case (_, samples, splits) =>
+      iter.map { case (_, sparseSamples, splits) =>
         val numBins = splits.length + 1
         val histograms = Array.fill(numNodes)(new Histogram(numBins))
 
-        var si = 0
-        while (si < samples.length) {
+        sparseSamples.foreachActive{(si, svalue)=>
           val ni = lcNodeNoTracker(si)
-          if (ni >= 0) {
-            if (samples(si)>=1) {
-              histograms(ni).update(samples(si), lcLambdas(si), lcWeights(si))
-            }
+          if (ni>=0) {
+            histograms(ni).update(svalue.toInt, lcLambdas(si), lcWeights(si))
           }
-          si += 1
         }
+
+//        var si = 0
+//        while (si < samples.length) {
+//          val ni = lcNodeNoTracker(si)
+//          if (ni >= 0) {
+//            if (samples(si)>=1) {
+//              histograms(ni).update(samples(si), lcLambdas(si), lcWeights(si))
+//            }
+//          }
+//          si += 1
+//        }
 
         Array.tabulate(numNodes)(ni => binsToBestSplit(histograms(ni), splits, lcNodesInfo(ni)))
       }

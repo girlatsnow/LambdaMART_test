@@ -1,6 +1,7 @@
 package org.apache.spark.examples.mllib
 
 import org.apache.hadoop.fs.Path
+import org.apache.spark.mllib.linalg.{SparseVector, Vectors}
 import org.apache.spark.mllib.tree.LambdaMART
 import org.apache.spark.mllib.tree.configuration._
 import org.apache.spark.mllib.tree.model.SplitInfo
@@ -141,18 +142,21 @@ object LambdaMARTRunner {
   }
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int)
-  : RDD[(Int, Array[Short], Array[SplitInfo])] = {
+  : RDD[(Int, SparseVector, Array[SplitInfo])] = {
     sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
-      val samples = parts(1).split(',').map(_.toShort)
+      //val samples = parts(1).split(',').map(_.toShort)
+      val sparseSamples = Vectors.dense(parts(1).split(',').map(_.toDouble)).toSparse
       val splits = if (parts.length > 2) {
         parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
       } else {
-        val maxFeat = samples.max
+        //val maxFeat = samples.max
+        val maxFeat = sparseSamples.values.max.toInt
         Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
       }
-      (feat, samples, splits)
+     //(feat, samples, splits)
+      (feat, sparseSamples, splits)
     }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
   }
 
@@ -182,7 +186,7 @@ object LambdaMARTRunner {
     thresholdMap
   }
 
-  def genTransposedData(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  def genTransposedData(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     numFeats: Int,
     numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
     println("generating transposed data...")
@@ -205,7 +209,8 @@ object LambdaMARTRunner {
       val fiMin = metaIter.next()._1
       val lcNumFeats = metaIter.length + 1
       val blocksPP = Array.tabulate(numPartitions)(pi => Array.ofDim[Short](lcNumFeats, lcNumSamplesPP(pi)))
-      dataIter.foreach { case (fi, samples, _) =>
+      dataIter.foreach { case (fi, sparseSamples, _) =>
+        val samples = sparseSamples.toArray.map(x=>x.toShort)
         val lfi = fi - fiMin
         var pi = 0
         while (pi < numPartitions) {

@@ -2,6 +2,7 @@ package org.apache.spark.mllib.tree
 
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.mllib.linalg.SparseVector
 import org.apache.spark.mllib.tree.configuration.Algo._
 import org.apache.spark.mllib.tree.configuration.BoostingStrategy
 import org.apache.spark.mllib.tree.impl.TimeTracker
@@ -16,7 +17,7 @@ import org.apache.spark.rdd.RDD
 class LambdaMART(val boostingStrategy: BoostingStrategy,
   val numLeaves: Int,
   val maxSplits: Int) extends Serializable with Logging {
-  def run(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  def run(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
@@ -33,7 +34,7 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
 }
 
 object LambdaMART extends Logging {
-  def train(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  def train(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
@@ -45,7 +46,7 @@ object LambdaMART extends Logging {
       .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
   }
   
-  private def boost(trainingData: RDD[(Int, Array[Short], Array[SplitInfo])],
+  private def boost(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
