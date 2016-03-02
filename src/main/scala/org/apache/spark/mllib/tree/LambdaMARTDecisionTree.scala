@@ -405,7 +405,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 //    var bestLteTarget = Double.NaN
 //    var bestLteWeight = Double.NaN
 //    var bestLteSquaredTarget = Double.NaN
-    var bestRtInfo = new NodeInfoStats(-1, Double.NaN, Double.NaN, Double.NaN)
+    val bestRtInfo = new NodeInfoStats(-1, Double.NaN, Double.NaN, Double.NaN)
     var bestShiftedGain = Double.NegativeInfinity
     var bestThreshold = 0
     val feature = splits(0).feature

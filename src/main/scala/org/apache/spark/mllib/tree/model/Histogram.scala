@@ -43,10 +43,11 @@ class Histogram(val numBins: Int) {
     // cumulate from right to left
     var bin = numBins-2
     while (bin >0) {
-      _counts(bin) += _counts(bin+1)
-      _scores(bin) += _scores(bin+1)
-      _squares(bin) += _squares(bin+1)
-      _scoreWeights(bin) += _scoreWeights(bin+1)
+      val binRight = bin+1
+      _counts(bin) += _counts(binRight)
+      _scores(bin) += _scores(binRight)
+      _squares(bin) += _squares(binRight)
+      _scoreWeights(bin) += _scoreWeights(binRight)
       bin -= 1
     }
 

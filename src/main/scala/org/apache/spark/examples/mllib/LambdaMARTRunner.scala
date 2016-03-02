@@ -4,6 +4,7 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.mllib.linalg.{SparseVector, Vectors}
 import org.apache.spark.mllib.tree.LambdaMART
 import org.apache.spark.mllib.tree.configuration._
+import org.apache.spark.mllib.tree.impl.TimeTracker
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
@@ -102,7 +103,11 @@ object LambdaMARTRunner {
       val queryBoundy = loadQueryBoundy(sc, params.queryBoundy)
       require(queryBoundy.last == numSamples, s"QueryBoundy file does not match with data!")
 
+
+
       val trainingData = loadTrainingData(sc, params.trainingData, sc.defaultParallelism)
+
+
       val numFeats = trainingData.count().toInt
 
       val trainingData_T = genTransposedData(trainingData, numFeats, numSamples)
@@ -143,10 +148,14 @@ object LambdaMARTRunner {
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int)
   : RDD[(Int, SparseVector, Array[SplitInfo])] = {
+    println("LoadTrainingData")
     sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
-      //val samples = parts(1).split(',').map(_.toShort)
+//      val samples = parts(1).split(',').map(_.toDouble)
+//      val idx = samples.zipWithIndex.par.map(x => (x._2, x._1)).filterNot(x => x._2==0.0).unzip
+//      val sparseSamples =new SparseVector(numSamples, idx._1.toArray, idx._2.toArray )
+
       val sparseSamples = Vectors.dense(parts(1).split(',').map(_.toDouble)).toSparse
       val splits = if (parts.length > 2) {
         parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
@@ -158,6 +167,7 @@ object LambdaMARTRunner {
      //(feat, samples, splits)
       (feat, sparseSamples, splits)
     }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
+
   }
 
   def loadlabelScores(sc: SparkContext, path: String): Array[Short] = {
