@@ -1,10 +1,9 @@
 package org.apache.spark.examples.mllib
 
+import breeze.linalg.SparseVector
 import org.apache.hadoop.fs.Path
-import org.apache.spark.mllib.linalg.{SparseVector, Vectors}
 import org.apache.spark.mllib.tree.LambdaMART
 import org.apache.spark.mllib.tree.configuration._
-import org.apache.spark.mllib.tree.impl.TimeTracker
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
@@ -103,11 +102,7 @@ object LambdaMARTRunner {
       val queryBoundy = loadQueryBoundy(sc, params.queryBoundy)
       require(queryBoundy.last == numSamples, s"QueryBoundy file does not match with data!")
 
-
-
       val trainingData = loadTrainingData(sc, params.trainingData, sc.defaultParallelism)
-
-
       val numFeats = trainingData.count().toInt
 
       val trainingData_T = genTransposedData(trainingData, numFeats, numSamples)
@@ -147,27 +142,42 @@ object LambdaMARTRunner {
   }
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int)
-  : RDD[(Int, SparseVector, Array[SplitInfo])] = {
-    println("LoadTrainingData")
+  : RDD[(Int, SparseVector[Short], Array[SplitInfo])] = {
     sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
-//      val samples = parts(1).split(',').map(_.toDouble)
-//      val idx = samples.zipWithIndex.par.map(x => (x._2, x._1)).filterNot(x => x._2==0.0).unzip
-//      val sparseSamples =new SparseVector(numSamples, idx._1.toArray, idx._2.toArray )
+      val samples = parts(1).split(',').map(_.toShort)
 
-      val sparseSamples = Vectors.dense(parts(1).split(',').map(_.toDouble)).toSparse
+      var is = 0
+      var nnz = 0
+      while (is < samples.length) {
+        if (samples(is) != 0) {
+          nnz += 1
+        }
+        is += 1
+      }
+      val idx = new Array[Int](nnz)
+      val vas = new Array[Short](nnz)
+      is = 0
+      nnz = 0
+      while (is < samples.length) {
+        if (samples(is) != 0) {
+          idx(nnz) = is
+          vas(nnz) = samples(is)
+          nnz += 1
+        }
+        is += 1
+      }
+      val sparseSamples = new SparseVector[Short](idx, vas, nnz, is)
+
       val splits = if (parts.length > 2) {
         parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
       } else {
-        //val maxFeat = samples.max
-        val maxFeat = sparseSamples.values.max.toInt
+        val maxFeat = sparseSamples.valuesIterator.max
         Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
       }
-     //(feat, samples, splits)
       (feat, sparseSamples, splits)
     }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
-
   }
 
   def loadlabelScores(sc: SparkContext, path: String): Array[Short] = {
@@ -196,7 +206,7 @@ object LambdaMARTRunner {
     thresholdMap
   }
 
-  def genTransposedData(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
+  def genTransposedData(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
     numFeats: Int,
     numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
     println("generating transposed data...")
@@ -220,7 +230,7 @@ object LambdaMARTRunner {
       val lcNumFeats = metaIter.length + 1
       val blocksPP = Array.tabulate(numPartitions)(pi => Array.ofDim[Short](lcNumFeats, lcNumSamplesPP(pi)))
       dataIter.foreach { case (fi, sparseSamples, _) =>
-        val samples = sparseSamples.toArray.map(x=>x.toShort)
+        val samples = sparseSamples.toArray
         val lfi = fi - fiMin
         var pi = 0
         while (pi < numPartitions) {
