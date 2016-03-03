@@ -16,27 +16,29 @@
  */
 
 package org.apache.spark.mllib.tree.model.opdtmodel
-import org.apache.spark.mllib.tree.model.node.Node
-import scala.collection.mutable
 
-import org.json4s._
-import org.json4s.JsonDSL._
-import org.json4s.jackson.JsonMethods._
+import java.io.{File, FileOutputStream, PrintWriter}
 
-import org.apache.spark.{Logging, SparkContext}
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.mllib.linalg.Vector
-import org.apache.spark.mllib.tree.configuration.{Algo, FeatureType}
 import org.apache.spark.mllib.tree.configuration.Algo._
+import org.apache.spark.mllib.tree.configuration.{Algo, FeatureType}
+import org.apache.spark.mllib.tree.model.Split
+import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
+import org.apache.spark.mllib.tree.model.node.Node
+import org.apache.spark.mllib.tree.model.predict.Predict
 import org.apache.spark.mllib.util.{Loader, Saveable}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SQLContext}
 import org.apache.spark.util.Utils
+import org.apache.spark.{Logging, SparkContext}
+import org.json4s.JsonDSL._
+import org.json4s._
+import org.json4s.jackson.JsonMethods._
 
-import org.apache.spark.mllib.tree.model.predict.Predict
-import org.apache.spark.mllib.tree.model.Split
-import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
+import scala.collection.mutable
+
 /**
  * :: Experimental ::
  * Decision tree model for classification or regression.
@@ -45,9 +47,9 @@ import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainSta
  * @param algo algorithm type -- classification or regression
  */
 @Experimental
-class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeatures:mutable.MutableList[String],
-                                 var splitgain: mutable.MutableList[Double], var gainPValues: mutable.MutableList[Double], var threshold:mutable.MutableList[Double])
+class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo)
   extends Serializable with Saveable {
+  type Lists = (List[String], List[Double], List[Double], List[Int], List[Int], List[Double], List[Double])
 
   /**
    * Predict values for a single data point using the model trained.
@@ -127,216 +129,79 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo,var splitfeat
     OptimizedDecisionTreeModel.SaveLoadV1_0.save(sc, path, this)
   }
 
+  def reformatted: Lists = {
+    val splitFeatures = new mutable.MutableList[String]
+    val splitGains = new mutable.MutableList[Double]
+    val gainPValues = new mutable.MutableList[Double]
+    val lteChildren = new mutable.MutableList[Int]
+    val gtChildren = new mutable.MutableList[Int]
+    val thresholds = new mutable.MutableList[Double]
+    val outputs = new mutable.MutableList[Double]
 
+    var curNonLeafIdx = 0
+    var curLeafIdx = 0
+    val childIdx = (child: Node) => if (child.isLeaf) {
+      curLeafIdx -= 1
+      curLeafIdx
+    } else {
+      curNonLeafIdx += 1
+      curNonLeafIdx
+    }
 
-  def sequence(path: String, model: OptimizedDecisionTreeModel, modelId: Int): Unit ={
+    val q = new mutable.Queue[Node]
+    q.enqueue(topNode)
+    while (q.nonEmpty) {
+      val node = q.dequeue()
+      if (!node.isLeaf) {
+        val split = node.split.get
+        val stats = node.stats.get
+        splitFeatures += s"I:${split.feature}"
+        splitGains += stats.gain
+        gainPValues += 0.0
+        thresholds += split.threshold
+        val left = node.leftNode.get
+        val right = node.rightNode.get
+        lteChildren += childIdx(left)
+        gtChildren += childIdx(right)
+        q.enqueue(left)
+        q.enqueue(right)
+      } else {
+        outputs += node.predict.predict
+      }
+    }
+    (splitFeatures.toList, splitGains.toList, gainPValues.toList, lteChildren.toList, gtChildren.toList,
+      thresholds.toList, outputs.toList)
+  }
 
-    import java.io.{File, PrintWriter, FileOutputStream}
-      println(s"flag1")
+  def sequence(path: String, model: OptimizedDecisionTreeModel, modelId: Int): Unit = {
+    val (splitFeatures, splitGains, gainPValues, lteChildren, gtChildren, thresholds, outputs) = reformatted
+
     val pw = new PrintWriter(new FileOutputStream(new File(path), true))
-     // pw.append("insert words").write("\n")
-     val length = model.splitfeatures.length
-    println(s"length:"+length)
+    pw.write(s"[Evaluator:$modelId]\n")
+    pw.write("EvaluatorType=DecisionTree\n")
+    pw.write(s"NumInternalNodes=${topNode.internalNodes}\n")
 
-    pw.append(s"[Evaluator:$modelId]").write("\r\n")
+    var str = splitFeatures.mkString("\t")
+    pw.write(s"SplitFeatures=$str\n")
+    str = splitGains.mkString("\t")
+    pw.write(s"SplitGain=$str\n")
+    str = splitGains.mkString("\t")
+    pw.write(s"SplitGain=$str\n")
+    str = gainPValues.mkString("\t")
+    pw.write(s"GainPValue=$str\n")
+    str = lteChildren.mkString("\t")
+    pw.write(s"LTEChild=$str\n")
+    str = gtChildren.mkString("\t")
+    pw.write(s"GTChild=$str\n")
+    str = thresholds.mkString("\t")
+    pw.write(s"Threshold=$str\n")
+    str = outputs.mkString("\t")
+    pw.write(s"Output=$str\n")
 
-    pw.append(s"EvaluatorType=DecisionTree").write("\r\n")
-
-    val NumInternalNodes = topNode.internalNodes
-    pw.append(s"NumInternalNodes=$NumInternalNodes").write("\r\n")
-
-    pw.append(s"SplitFeatures=").write("")
-    model.splitfeatures.foreach {
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-
-    pw.append(s"SplitGain=").write("")
-    model.splitgain.foreach {
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-
-    pw.append(s"GainPValue=").write("")
-    model.gainPValues.foreach {
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-
-    pw.append(s"LTEChild=").write("")
-    Node.getLTENodes(topNode).foreach{
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-
-    pw.append(s"GTChild=").write("")
-    Node.getGTNodes(topNode).foreach{
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-
-    pw.append(s"Threshold=").write("")
-    model.threshold.foreach{
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-    pw.write("\r\n")
-    
-    pw.append(s"Output=").write("")
-    Node.getOutput(topNode).foreach{
-      x =>
-        pw.append(s"$x").write("\t")
-    }
-
-    pw.append("\n").write("\n")
-    pw.flush
-    pw.close
-
-    // val nodes = model.topNode.subtreeIterator.toSeq
-    // val dataRDD: DataFrame = sc.parallelize(nodes)
-    //   .map(TreeNodeData.apply(0, _))
-    //   .toDF()
-    // dataRDD.write.parquet(Loader.dataPath(path))
-
+    pw.write("\n")
+    pw.close()
     println(s"save succeed")
-
   }
-
-
-  def deSequence(sc: SparkContext, path: String, algo: String): OptimizedDecisionTreeModel = {
-    import scala.io.Source
-    var LTEChild = new mutable.MutableList[Int]
-    var GTChild = new mutable.MutableList[Int]
-    var splitfeatures = new mutable.MutableList[String]
-    var splitgain = new mutable.MutableList[Double]
-    var threshold = new mutable.MutableList[Double]
-    var output = new mutable.MutableList[Double]
-
-    val source = Source.fromFile(path)
-    val lineIterator = source.getLines
-    for (l <- lineIterator){
-      println(l) // l is a String
-      if(l.startsWith("SplitFeatures=")){
-        val lArray = l.split("\t")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          splitfeatures += temp
-        }
-      }
-
-      if(l.startsWith("SplitGain=")){
-        val lArray = l.split("\t")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          splitgain += temp.toDouble
-        }
-      }
-
-      if(l.startsWith("Threshold=")){
-        val lArray = l.split("\t")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          threshold += temp.toDouble
-        }
-      }
-      if(l.startsWith("LTEChild=")){
-        val lArray = l.split("\t")
-        println("ltechild=")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          println("ltechild=")
-          LTEChild += temp.toInt
-        }
-      }
-      if(l.startsWith("GTChild=")){
-        val lArray = l.split("\t")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          GTChild += temp.toInt
-        }
-      }
-      if(l.startsWith("Output=")){
-        val lArray = l.split("\t")
-        for( i <- 1 to lArray.length-1) {
-          val temp = lArray(i)
-          println(s"$temp")
-          output += temp.toDouble
-        }
-      }
-    }
-    val test3 = LTEChild.length
-    println(s"test3:$test3")
-    val rootNode = createRootNode(LTEChild,GTChild,splitfeatures,splitgain,threshold,output)
-    val model = new OptimizedDecisionTreeModel(rootNode,Algo.fromString(algo),splitfeatures,splitgain,gainPValues,threshold)
-    model
-  }
-
-  def createRootNode(LTEChild:mutable.MutableList[Int],GTChild:mutable.MutableList[Int],
-                     splitfeatures:mutable.MutableList[String],splitgain:mutable.MutableList[Double],
-                     threshold:mutable.MutableList[Double],output:mutable.MutableList[Double]): Node ={
-
-    var splitfeaturesQueue = splitfeatures.toQueue
-    var LTEChildQueue = LTEChild.toQueue
-    var GTChildQueue = GTChild.toQueue
-    var outputQueue = output.toQueue
-    var rootNode = Node.emptyNode(0)
-    var tempNode = rootNode
-    while(!splitfeaturesQueue.isEmpty){
-
-      // val temp = splitfeatures.head
-      // tempNode.split.get.feature = 2
-
-      //    //Selects all elements except first n ones.
-      // splitfeatures =splitfeatures.drop(1)
-
-      // tempNode.split.get.threshold = threshold.head
-      //    threshold = threshold.drop(1)
-      var leftNodeisLeaf = false
-      if( !LTEChildQueue.isEmpty) leftNodeisLeaf = (LTEChildQueue.dequeue() < 0)
-
-
-      var rightNodeisLeaf = false
-      if( !GTChildQueue.isEmpty) rightNodeisLeaf = (GTChildQueue.dequeue() < 0)
-
-      var leftPredict =new Predict(0.0,0.0)
-
-      if(leftNodeisLeaf)
-        if(!outputQueue.isEmpty)
-          leftPredict.predict = outputQueue.dequeue()
-
-      var rightPredict =new Predict(0.0,0.0)
-      if(rightNodeisLeaf)
-        if(!outputQueue.isEmpty)
-          rightPredict.predict = outputQueue.dequeue()
-
-      tempNode.leftNode = Some(Node(LTEChild.head,
-        leftPredict, 0.0, leftNodeisLeaf))
-      LTEChild.drop(1)
-      tempNode.rightNode = Some(Node(GTChild.head,
-        rightPredict, 0.0, rightNodeisLeaf))
-      GTChild.drop(1)
-
-      if(!leftNodeisLeaf)
-        tempNode = tempNode.leftNode.get
-      else
-        tempNode = tempNode.rightNode.get
-
-      splitfeaturesQueue.dequeue()
-    }
-    rootNode
-  }
-
-
 
   override protected def formatVersion: String = OptimizedDecisionTreeModel.formatVersion
 }
@@ -465,7 +330,7 @@ object OptimizedDecisionTreeModel extends Loader[OptimizedDecisionTreeModel] wit
         val trees = constructTrees(nodes)
         assert(trees.size == 1,
           "Decision tree should contain exactly one tree but got ${trees.size} trees.")
-        val model = new OptimizedDecisionTreeModel(trees(0), Algo.fromString(algo),null,null,null,null)
+        val model = new OptimizedDecisionTreeModel(trees(0), Algo.fromString(algo))
         assert(model.numNodes == numNodes, s"Unable to load OptimizedDecisionTreeModel data from: $datapath." +
           s" Expected $numNodes nodes but found ${model.numNodes}")
         model
@@ -488,7 +353,8 @@ object OptimizedDecisionTreeModel extends Loader[OptimizedDecisionTreeModel] wit
 
       /**
        * Given a list of nodes from a tree, construct the tree.
-       * @param data array of all node data in a tree.
+        *
+        * @param data array of all node data in a tree.
        */
       def constructTree(data: Array[TreeNodeData]): Node = {
         val dataMap: Map[Int, TreeNodeData] = data.map(n => n.nodeId -> n).toMap
@@ -516,7 +382,7 @@ object OptimizedDecisionTreeModel extends Loader[OptimizedDecisionTreeModel] wit
             val rightNode = constructNode(data.rightNodeId.get, dataMap, nodes)
             val stats = new InformationGainStats(data.infoGain.get, data.impurity, leftNode.impurity,
               rightNode.impurity, leftNode.predict, rightNode.predict)
-            new Node(data.nodeId, 0, data.predict.toPredict, data.impurity, data.isLeaf,
+            new Node(data.nodeId, data.predict.toPredict, data.impurity, data.isLeaf,
               data.split.map(_.toSplit), Some(leftNode), Some(rightNode), Some(stats))
           }
         nodes += node.id -> node

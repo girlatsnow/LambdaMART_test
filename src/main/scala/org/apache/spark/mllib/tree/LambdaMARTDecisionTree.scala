@@ -9,7 +9,7 @@ import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainSta
 import org.apache.spark.mllib.tree.model.node._
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
 import org.apache.spark.mllib.tree.model.predict.Predict
-import org.apache.spark.mllib.tree.model.{NodeInfoStats, Histogram, SplitInfo}
+import org.apache.spark.mllib.tree.model.{Histogram, NodeInfoStats, SplitInfo}
 import org.apache.spark.mllib.util.ProbabilityFunctions
 import org.apache.spark.rdd.RDD
 
@@ -24,8 +24,6 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
   strategy.assertValid()
 
   var curLeaves = 0
-  val leafNo = Array(-1)
-  val nonLeafNo = Array(1)
 
   def run(trainingData: RDD[(Int, SparseVector, Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
@@ -58,11 +56,6 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     // TBD re-declared
     val nodeId2Score = new mutable.HashMap[Int, Double]()
 
-    val splitfeatures = mutable.MutableList[String]()
-    val splitgain = mutable.MutableList[Double]()
-    val threshold = mutable.MutableList[Double]()
-    val gainPValues = mutable.MutableList[Double]()
-
     while (nodeQueue.nonEmpty && (numLeaves == 0 || curLeaves < numLeaves)) {
       val (nodesToSplits, nodesInfo, nodeId2NodeNo) = selectNodesToSplit(nodeQueue, maxSplits)
 
@@ -74,8 +67,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       timer.start("findBestSplits")
       val maxDepth = if (numLeaves > 0) 32 else strategy.maxDepth
       val newSplits = LambdaMARTDecisionTree.findBestSplits(trainingData, trainingData_T, lambdasBc, weightsBc,
-        maxDepth, nodesToSplits, nodesInfo, nodeId2Score, nodeNoTracker, nodeQueue, timer,
-        splitfeatures, splitgain, gainPValues, threshold, leafNo, nonLeafNo)
+        maxDepth, nodesToSplits, nodesInfo, nodeId2Score, nodeNoTracker, nodeQueue, timer)
 
       newSplits.par.foreach { case (siMin, lcNumSamples, splitIndc, isLeftChild) =>
         var lsi = 0
@@ -106,7 +98,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       treeScores(si) = nodeId2Score(nodeIdTracker(si))
     )
 
-    val model = new OptimizedDecisionTreeModel(topNode, strategy.algo, splitfeatures, splitgain, gainPValues, threshold)
+    val model = new OptimizedDecisionTreeModel(topNode, strategy.algo)
     (model, treeScores)
   }
 
@@ -154,13 +146,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     nodeId2Score: mutable.HashMap[Int, Double],
     nodeNoTracker: Array[Byte],
     nodeQueue: mutable.PriorityQueue[(Node, NodeInfoStats)],
-    timer: TimeTracker,
-    splitfeatures: mutable.MutableList[String],
-    splitgain: mutable.MutableList[Double],
-    gainPValues: mutable.MutableList[Double],
-    threshold: mutable.MutableList[Double],
-    leafNo: Array[Int],
-    nonLeafNo: Array[Int]): Array[(Int, Int, BitSet, BitSet)] = {
+    timer: TimeTracker): Array[(Int, Int, BitSet, BitSet)] = {
     // numNodes:  Number of nodes in this group
     val numNodes = nodesToSplit.length
     println("numNodes = " + numNodes)
@@ -212,7 +198,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     while (sni < numNodes) {
       val node = nodesToSplit(sni)
       val nodeId = node.id
-      val (split: SplitInfo, stats: InformationGainStats, gainPValue: Double, leftNodeInfo: NodeInfoStats, rtNodeInfo: NodeInfoStats) = bestSplits(sni)
+      val (split, stats, gainPValue, leftNodeInfo, rtNodeInfo) = bestSplits(sni)
       logDebug("best split = " + split)
 
       // Extract info for this node.  Create children if not leaf.
@@ -226,11 +212,6 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       // nodePredict.predict(node.id, nodeIdTrackerBc, targetScoresBc, weightsBc)
 
       if (!isLeaf) {
-        splitfeatures += "I:" + split.feature.toString
-        splitgain += stats.gain
-        threshold += split.threshold
-        gainPValues += gainPValue
-
         node.split = Some(split)
         val childIsLeaf = (Node.indexToLevel(nodeId) + 1) == maxDepth
         val leftChildIsLeaf = childIsLeaf || (stats.leftImpurity == 0.0)
@@ -242,22 +223,6 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
         node.rightNode = Some(Node(Node.rightChildIndex(nodeId),
           stats.rightPredict, stats.rightImpurity, rightChildIsLeaf))
         nodeId2Score(node.rightNode.get.id) = node.rightNode.get.predict.predict
-
-        if (leftChildIsLeaf) {
-          node.leftNode.get.id2 = leafNo(0)
-          leafNo(0) -= 1
-        } else {
-          node.leftNode.get.id2 = nonLeafNo(0)
-          nonLeafNo(0) += 1
-        }
-
-        if (rightChildIsLeaf) {
-          node.rightNode.get.id2 = leafNo(0)
-          leafNo(0) -= 1
-        } else {
-          node.rightNode.get.id2 = nonLeafNo(0)
-          nonLeafNo(0) += 1
-        }
 
         // enqueue left child and right child if they are not leaves
         if (!leftChildIsLeaf) {
