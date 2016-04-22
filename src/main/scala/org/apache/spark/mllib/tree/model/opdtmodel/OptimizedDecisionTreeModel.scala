@@ -155,7 +155,7 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo)
       if (!node.isLeaf) {
         val split = node.split.get
         val stats = node.stats.get
-        splitFeatures += s"I:${split.feature}"
+        splitFeatures += s"I:${split.feature+1}"
         splitGains += stats.gain
         gainPValues += 0.0
         thresholds += split.threshold
@@ -198,7 +198,7 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo)
 
     pw.write("\n")
     pw.close()
-    println(s"save succeed")
+
   }
 
   override protected def formatVersion: String = OptimizedDecisionTreeModel.formatVersion

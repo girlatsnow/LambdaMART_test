@@ -39,6 +39,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     val maxDepth = strategy.maxDepth
     require(maxDepth <= 30, s"LambdaMART currently only supports maxDepth <= 30, but $maxDepth was given.")
     // val maxMemoryUsage: Long = strategy.maxMemoryInMB * 1024L * 1024L
+    val minInstancesPerNode = strategy.minInstancesPerNode
 
     // FIFO queue of nodes to train: node
     implicit val nodeOrd = Ordering.by[Node, Double](_.impurity).reverse
@@ -67,7 +68,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       timer.start("findBestSplits")
       val maxDepth = if (numLeaves > 0) 32 else strategy.maxDepth
       val newSplits = LambdaMARTDecisionTree.findBestSplits(trainingData, trainingData_T, lambdasBc, weightsBc,
-        maxDepth, nodesToSplits, nodesInfo, nodeId2Score, nodeNoTracker, nodeQueue, timer)
+        maxDepth, nodesToSplits, nodesInfo, nodeId2Score, nodeNoTracker, nodeQueue, timer, minInstancesPerNode)
 
       newSplits.par.foreach { case (siMin, lcNumSamples, splitIndc, isLeftChild) =>
         var lsi = 0
@@ -141,7 +142,8 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     nodeId2Score: mutable.HashMap[Int, Double],
     nodeNoTracker: Array[Byte],
     nodeQueue: mutable.PriorityQueue[(Node, NodeInfoStats)],
-    timer: TimeTracker): Array[(Int, Int, BitSet, BitSet)] = {
+    timer: TimeTracker,
+      minDocPerNode: Int): Array[(Int, Int, BitSet, BitSet)] = {
     // numNodes:  Number of nodes in this group
     val numNodes = nodesToSplit.length
     println("numNodes = " + numNodes)
@@ -172,7 +174,10 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
           offset += 1
         }
 
-        Array.tabulate(numNodes)(ni => binsToBestSplit(histograms(ni), splits, lcNodesInfo(ni)))
+        Array.tabulate(numNodes)(ni =>
+          binsToBestSplit(histograms(ni), splits, lcNodesInfo(ni), minInstancesPerNode = minDocPerNode)
+
+        )
       }
     }
 
@@ -185,16 +190,18 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     while (sni < numNodes) {
       val node = nodesToSplit(sni)
       val nodeId = node.id
-      val (split, stats, gainPValue, leftNodeInfo, rtNodeInfo) = bestSplits(sni)
-      logDebug("best split = " + split)
+      val ((split,bin), stats, gainPValue, leftNodeInfo, rtNodeInfo) = bestSplits(sni)
+      logDebug(s"best split = $split, bin = $bin")
 
       // Extract info for this node.  Create children if not leaf.
       val isLeaf = (stats.gain <= 0) || (Node.indexToLevel(nodeId) == maxDepth)
+
       node.isLeaf = isLeaf
       node.stats = Some(stats)
       node.impurity = stats.impurity
       logDebug("Node = " + node)
-
+      logDebug("LeftInfo = " + leftNodeInfo)
+      logDebug("RightInfo = " + rtNodeInfo)
       nodeId2Score(node.id) = node.predict.predict
       // nodePredict.predict(node.id, nodeIdTrackerBc, targetScoresBc, weightsBc)
 
@@ -243,8 +250,9 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
           val node = lcNewNodesToSplit(oldNi)
           if (!node.isLeaf) {
             splitIndc += lsi
-            val split = lcBestSplits(oldNi)._1
-            if (sampleSlice(split.feature)(lsi) <= split.threshold) {
+            val split = lcBestSplits(oldNi)._1._1
+            val bin = lcBestSplits(oldNi)._1._2
+            if (sampleSlice(split.feature)(lsi) <= bin) {
               isLeftChild += lsi
             }
           }
@@ -254,16 +262,16 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       Iterator.single((siMin, lcNumSamples, splitIndc.toImmutable, isLeftChild.toImmutable))
     }.collect()
 
-    bestSplitsBc.destroy(blocking=false)
-    newNodesToSplitBc.destroy(blocking=false)
-    nodeNoTrackerBc.destroy(blocking=false)
-    nodesInfoBc.destroy(blocking = false)
+    bestSplitsBc.unpersist(blocking=false)
+    newNodesToSplitBc.unpersist(blocking=false)
+    nodeNoTrackerBc.unpersist(blocking=false)
+    nodesInfoBc.unpersist(blocking = false)
     newSplits
   }
 
-  def betterSplits(numNodes: Int)(a: Array[(SplitInfo, InformationGainStats, Double, NodeInfoStats, NodeInfoStats)],
-    b: Array[(SplitInfo, InformationGainStats, Double, NodeInfoStats, NodeInfoStats)])
-  : Array[(SplitInfo, InformationGainStats, Double, NodeInfoStats, NodeInfoStats)] = {
+  def betterSplits(numNodes: Int)(a: Array[((SplitInfo,Short), InformationGainStats, Double, NodeInfoStats, NodeInfoStats)],
+    b: Array[((SplitInfo, Short), InformationGainStats, Double, NodeInfoStats, NodeInfoStats)])
+  : Array[((SplitInfo,Short), InformationGainStats, Double, NodeInfoStats, NodeInfoStats)] = {
     Array.tabulate(numNodes) { ni =>
       val ai = a(ni)
       val bi = b(ni)
@@ -276,59 +284,56 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     splits: Array[SplitInfo],
     nodeInfo: NodeInfoStats,
     minInstancesPerNode: Int = 1,
-    minGain: Double = Double.MinPositiveValue): (SplitInfo, InformationGainStats, Double, NodeInfoStats, NodeInfoStats) = {
+    display: Boolean = false,
+    minGain: Double = Double.MinPositiveValue): ((SplitInfo, Short), InformationGainStats, Double, NodeInfoStats, NodeInfoStats) = {
+
+    val feature = splits(0).feature
+
     val cumHist = hist.cumulate(nodeInfo)
-    // val totalDocInNode = cumHist.counts.last.toInt
-    // val sumTargets = cumHist.scores.last
-    // val sumWeight = cumHist.scoreWeights.last
-    // val sumSquares = cumHist.squares.last
-    // val impurity = (sumSquares - sumTargets * sumTargets / totalDocInNode) / totalDocInNode
 
     //val denom = if (sumWeight == 0.0) totalDocInNode else sumWeight
     val varianceTargets = (nodeInfo.sumSquares - nodeInfo.sumScores / nodeInfo.sumCount) / (nodeInfo.sumCount - 1)
     //val eps = 1e-10
-    val gainShift = getLeafSplitGain(nodeInfo.sumCount, nodeInfo.sumScores)
+    val gainShift = getLeafSplitGain(nodeInfo.sumCount, nodeInfo.sumScores, nodeInfo.sumScoreWeights)
+
     // val gainConfidenceLevel = 0.95
     // var gainConfidenceInSquaredStandardDeviations = ProbabilityFunctions.Probit(1.0 - (1.0 - gainConfidenceLevel) * 0.5)
     // gainConfidenceInSquaredStandardDeviations *= gainConfidenceInSquaredStandardDeviations
 
-    //val entropyCoefficient = 0.0 // an outer tuning parameters
-    // val minShiftedGain = if (gainConfidenceInSquaredStandardDeviations <= 0) 0.0
-    //   else (gainConfidenceInSquaredStandardDeviations * varianceTargets *
-    //     totalDocInNode / (totalDocInNode - 1) + gainShift)
-    // var bestLteCount = -1
-    // var bestLteTarget = Double.NaN
-    // var bestLteWeight = Double.NaN
-    // var bestLteSquaredTarget = Double.NaN
+    val entropyCoefficient = 0.1 * 1.0e-6 // an outer tuning parameters
     val bestRtInfo = new NodeInfoStats(-1, Double.NaN, Double.NaN, Double.NaN)
     var bestShiftedGain = Double.NegativeInfinity
-    var bestThreshold = 0
-    val feature = splits(0).feature
+    var bestThreshold = 0.0
+    var bestThresholdBin = 0
 
     var i = 0
     while (i < splits.length) {
-      val threshLeft = splits(i).threshold.toInt + 1
+      val threshLeft = i+1
       val rtCount = cumHist.counts(threshLeft).toInt
       val lteCount = nodeInfo.sumCount - rtCount
       val rtSumTarget = cumHist.scores(threshLeft)
-      // val rtSumWeight = cumHist.scoreWeights(threshLeft)
+      val rtSumWeight = cumHist.scoreWeights(threshLeft)
       val lteSumTarget = nodeInfo.sumScores - rtSumTarget
-      // val lteSumWeight = nodeInfo.sumScoreWeights - rtSumWeight
+      val lteSumWeight = nodeInfo.sumScoreWeights - rtSumWeight
       // val gain = lscores * lscores / lcnts + rscores * rscores / rcnts  gainShift >= minShiftedGain
       if (lteCount >= minInstancesPerNode && rtCount >= minInstancesPerNode) {
-        val currentShiftedGain = getLeafSplitGain(lteCount, lteSumTarget) + getLeafSplitGain(rtCount, rtSumTarget)
-        //        if (entropyCoefficient > 0) {
-        //          val entropyGain = totalDocInNode * math.log(totalDocInNode) - lteCount * math.log(lteCount) -
-        //            rtCount * math.log(rtCount)
-        //          currentShiftedGain += entropyCoefficient * entropyGain
-        //        }
+        val currentShiftedGain = getLeafSplitGain(lteCount, lteSumTarget, lteSumWeight) + getLeafSplitGain(rtCount, rtSumTarget, rtSumWeight)
+            //   if (entropyCoefficient > 0) {
+             //    val entropyGain = nodeInfo.sumCount * math.log(nodeInfo.sumCount) - lteCount * math.log(lteCount) -
+             //      rtCount * math.log(rtCount)
+             //    currentShiftedGain += entropyCoefficient * entropyGain
+           //    }
+
+
+
         if (currentShiftedGain > bestShiftedGain) {
           bestRtInfo.sumCount = rtCount
           bestRtInfo.sumScores = rtSumTarget
           bestRtInfo.sumSquares = cumHist.squares(threshLeft)
           bestRtInfo.sumScoreWeights = cumHist.scoreWeights(threshLeft)
           bestShiftedGain = currentShiftedGain
-          bestThreshold = threshLeft - 1
+          bestThreshold = splits(threshLeft - 1).threshold
+          bestThresholdBin = i
         }
       }
       i += 1
@@ -343,7 +348,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     val gtImpurity = (bestRtInfo.sumSquares - bestRtInfo.sumScores * bestRtInfo.sumScores / bestRtInfo.sumCount) / bestRtInfo.sumCount
     val tolImpurity = (nodeInfo.sumSquares - nodeInfo.sumScores * nodeInfo.sumScores / nodeInfo.sumCount) / nodeInfo.sumCount
 
-    val bestSplitInfo = new SplitInfo(feature, bestThreshold.toDouble)
+    val bestSplitInfo = (new SplitInfo(feature, bestThreshold), bestThresholdBin.toShort)
     val lteOutput = CalculateSplittedLeafOutput(bestLeftInfo.sumCount, bestLeftInfo.sumScores, bestLeftInfo.sumScoreWeights)
     val gtOutput = CalculateSplittedLeafOutput(bestRtInfo.sumCount, bestRtInfo.sumScores, bestRtInfo.sumScoreWeights)
     val ltePredict = new Predict(lteOutput)
@@ -356,12 +361,14 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     val inforGainStat = new InformationGainStats(splitGain, tolImpurity, lteImpurity, gtImpurity, ltePredict, gtPredict)
     val erfcArg = math.sqrt((bestShiftedGain - gainShift) * (nodeInfo.sumCount - 1) / (2 * varianceTargets * nodeInfo.sumCount))
     val gainPValue = ProbabilityFunctions.erfc(erfcArg)
+
     (bestSplitInfo, inforGainStat, gainPValue, bestLeftInfo, bestRtInfo)
   }
 
-  def getLeafSplitGain(count: Double, target: Double): Double = {
+  def getLeafSplitGain(count: Double, target: Double, weight: Double): Double = {
     //val pesuedCount = if(weight == 0.0) count else weight
-    target * target / count
+    //target * target / count
+    target * target / (weight + 1e-9)
   }
 
   def CalculateSplittedLeafOutput(totalCount: Int, sumTargets: Double, sumWeights: Double): Double = {
@@ -379,5 +386,6 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 //      }
 //    }
     sumTargets / (sumWeights + 1e-9)
+    //sumTargets / totalCount
   }
 }

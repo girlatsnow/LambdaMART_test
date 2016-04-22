@@ -2,10 +2,12 @@ package org.apache.spark.examples.mllib
 
 import breeze.linalg.SparseVector
 import org.apache.hadoop.fs.Path
-import org.apache.spark.mllib.tree.LambdaMART
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.tree.configuration._
 import org.apache.spark.mllib.tree.model.SplitInfo
-import org.apache.spark.mllib.util.TreeUtils
+import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
+import org.apache.spark.mllib.tree.{DerivativeCalculator, LambdaMART}
+import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
@@ -18,14 +20,21 @@ object LambdaMARTRunner {
   case class Params(trainingData: String = null,
     testData: String = null,
     queryBoundy: String = null,
-    modelOutput: String = null,
+    testQueryBound: String = null,
+    outputTreeEnsemble: String = null,
     labelScores: String = null,
+    testLabel: String = null,
     initScores: String = null,
+    gainTableStr: String = null,
     algo: String = "Regression",
     maxDepth: Int = 8,
     numLeaves: Int = 0,
     numIterations: Int = 10,
-    maxSplits: Int = 128) extends AbstractParams[Params]
+    maxSplits: Int = 128,
+    numsOfIniEvaluators: Int = 0,
+    learningRate: Double = 1.0,
+    minInstancesPerNode: Int = 2000,
+    testRate: Int = 0) extends AbstractParams[Params]
 
   def main(args: Array[String]) {
     val defaultParams = Params()
@@ -44,10 +53,10 @@ object LambdaMARTRunner {
         .text("queryBoundy path")
         .required()
         .action((x, c) => c.copy(queryBoundy = x))
-      opt[String]("modelOutput")
-        .text("modelOutput path")
+      opt[String]("outputTreeEnsemble")
+        .text("outputTreeEnsemble path")
         .required()
-        .action((x, c) => c.copy(modelOutput = x))
+        .action((x, c) => c.copy(outputTreeEnsemble = x))
       opt[String]("labelScores")
         .text("labelScores path to training dataset")
         .required()
@@ -55,6 +64,9 @@ object LambdaMARTRunner {
       opt[String]("initScores")
         .text(s"initScores path to training dataset. If not given, initScores will be {0 ...}.")
         .action((x, c) => c.copy(initScores = x))
+      opt[String]("gainTableStr")
+        .text(s"gainTableStr parameters")
+        .action((x, c) => c.copy(gainTableStr = x))
       opt[String]("algo")
         .text(s"algorithm (${Algo.values.mkString(",")}), default: ${defaultParams.algo}")
         .action((x, c) => c.copy(algo = x))
@@ -67,9 +79,30 @@ object LambdaMARTRunner {
       opt[Int]("numIterations")
         .text(s"number of iterations of boosting," + s" default: ${defaultParams.numIterations}")
         .action((x, c) => c.copy(numIterations = x))
+      opt[Int]("minInstancesPerNode")
+        .text(s"the minimum number of documents allowed in a leaf of the tree, default: ${defaultParams.minInstancesPerNode}")
+        .action((x, c) => c.copy(minInstancesPerNode = x))
       opt[Int]("maxSplits")
         .text(s"max Nodes to be split simultaneously, default: ${defaultParams.maxSplits}")
         .action((x, c) => c.copy(maxSplits = x))
+      opt[Double]("learningRate")
+        .text(s"learning rate of the score update, default: ${defaultParams.learningRate}")
+        .action((x, c) => c.copy(learningRate = x))
+      opt[Int]("numsOfIniEvaluators")
+        .text(s"nums Of IniEvaluators, default: ${defaultParams.numsOfIniEvaluators}")
+        .action((x, c) => c.copy(numsOfIniEvaluators = x))
+      opt[String]("testQueryBound")
+        .text("test queryBoundy path")
+        .required()
+        .action((x, c) => c.copy(testQueryBound = x))
+      opt[String]("testLabel")
+        .text("test labelScores path to training dataset")
+        .required()
+        .action((x, c) => c.copy(testLabel = x))
+      opt[Int]("testRate")
+        .text(s"frequecy of test NDCG, default: ${defaultParams.testRate}")
+        .action((x, c) => c.copy(testRate = x))
+
       checkConfig(params =>
         if (params.maxDepth > 30) {
           failure(s"maxDepth ${params.maxDepth} value incorrect; should be less than or equals to 30.")
@@ -102,31 +135,51 @@ object LambdaMARTRunner {
       val queryBoundy = loadQueryBoundy(sc, params.queryBoundy)
       require(queryBoundy.last == numSamples, s"QueryBoundy file does not match with data!")
 
-      val trainingData = loadTrainingData(sc, params.trainingData, sc.defaultParallelism)
+      val trainingData = loadTrainingData(sc, params.trainingData,sc.defaultMinPartitions)
       val numFeats = trainingData.count().toInt
-
+      println()
       val trainingData_T = genTransposedData(trainingData, numFeats, numSamples)
-
+      val gainTable = params.gainTableStr.split(':').map(_.toDouble)
       //val samplePercent = 1.0/3.0
       //val numfeaturesAfterSampling = samplePercent * numfeatures
-      //val trainingData = trainingDataRaw.sample(false, samplePercent, Random.nextLong())
+      //val trainingData = trainingData.sample(false, samplePercent, Random.nextLong())
       //println(trainingDataRaw.count(), trainingData.count())
-      // val testData = MLUtils.loadLibSVMFile(sc, params.testData).cache()
+      //val testData = MLUtils.loadLibSVMFile(sc, params.testData).cache()
 
       val boostingStrategy = BoostingStrategy.defaultParams(params.algo)
-      boostingStrategy.treeStrategy.maxDepth = params.maxDepth
-      boostingStrategy.numIterations = params.numIterations
+      boostingStrategy.treeStrategy.setMaxDepth(params.maxDepth)
+      boostingStrategy.setNumIterations(params.numIterations)
+      boostingStrategy.setLearningRate(params.learningRate)
+      boostingStrategy.treeStrategy.setMinInstancesPerNode(params.minInstancesPerNode)
+
 
       if (params.algo == "Regression") {
         val startTime = System.nanoTime()
-        val model = LambdaMART.train(trainingData, trainingData_T, labelScores, initScores, queryBoundy,
+        val model = LambdaMART.train(trainingData, trainingData_T, labelScores, initScores, queryBoundy, gainTable,
           boostingStrategy, params.numLeaves, params.maxSplits)
         val elapsedTime = (System.nanoTime() - startTime) / 1e9
         println(s"Training time: $elapsedTime seconds")
 
-        val outPath = new Path(params.modelOutput)
+        // test
+
+        if(params.testRate!=0) {
+          testModel(sc, model, params, gainTable)
+        }
+
+
+
+        for(i <- 0 until model.trees.length){
+          val evaluator = model.trees(i)
+          evaluator.sequence("treeEnsemble.ini", evaluator, params.numsOfIniEvaluators + i + 1)
+        }
+        println(s"save succeed")
+        val totalEvaluators = model.trees.length
+        val evalNodes = Array.tabulate[Int](totalEvaluators)(_ + 1)
+        treeAggregatorFormat.appendTreeAggregator("treeEnsemble.ini", totalEvaluators + 1, evalNodes)
+
+        val outPath = new Path(params.outputTreeEnsemble)
         val fs = TreeUtils.getFileSystem(trainingData.context.getConf, outPath)
-        fs.copyFromLocalFile(true, true, new Path("treeEnsemble.ini"), outPath)
+        fs.copyFromLocalFile(false, true, new Path("treeEnsemble.ini"), outPath)
 
         if (model.totalNumNodes < 30) {
           println(model.toDebugString) // Print full model.
@@ -179,7 +232,10 @@ object LambdaMARTRunner {
       (feat, sparseSamples, splits)
     }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
   }
-
+  def loadTestData(sc: SparkContext, path: String): RDD[Vector] = {
+    sc.textFile(path).map{line => Vectors.dense(line.split(',').map(_.toDouble))
+    }
+  }
   def loadlabelScores(sc: SparkContext, path: String): Array[Short] = {
     sc.textFile(path).first().split(',').map(_.toShort)
   }
@@ -255,6 +311,45 @@ object LambdaMARTRunner {
     trainingData_T
   }
 
+  def testModel(sc: SparkContext, model: GradientBoostedDecisionTreesModel, params: Params, gainTable:Array[Double]):Array[Double]={
+    val testData = loadTestData(sc, params.testData).cache().setName("TestData")
+    val testLabels = loadlabelScores(sc, params.testLabel)
+    val numTest = testData.count()
+    val testQueryBound = loadQueryBoundy(sc, params.testQueryBound)
+    require(testQueryBound.last == numTest, s"TestQueryBoundy file does not match with test data!")
+
+    val predictions = testData.map { features =>
+      val scores = model.trees.map(_.predict(features))
+      for (it <- 1 to model.trees.length) {
+        scores(it) += scores(it - 1)
+      }
+
+      scores.zipWithIndex.collect {
+        case (score, it) if it % params.testRate == 0 => score
+      }
+    }.collect().transpose
+
+    val dc = new DerivativeCalculator
+    dc.init(testLabels, gainTable,  testQueryBound)
+    val numQueries = testQueryBound.length - 1
+    val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultParallelism)
+    val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("testPDCCtrl")
+
+    val dcBc = sc.broadcast(dc)
+    predictions.map{scores =>
+      val currentScoresBc = sc.broadcast(scores)
+      val sumErrors = pdcRDD.mapPartitions { iter =>
+        val dc = dcBc.value
+        val currentScores = currentScoresBc.value
+        iter.map { case (qiMin, lcNumQueries) =>
+          dc.getPartErrors(currentScores, qiMin, qiMin + lcNumQueries)
+        }
+      }.sum()
+      currentScoresBc.destroy(blocking=false)
+      sumErrors / numQueries
+    }
+
+  }
   /***
     * def meanSquaredError(
     * model: { def predict(features: Vector): Double },

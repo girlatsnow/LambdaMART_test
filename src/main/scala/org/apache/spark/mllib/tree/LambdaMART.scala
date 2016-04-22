@@ -10,9 +10,8 @@ import org.apache.spark.mllib.tree.impurity.Variance
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
-import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
+import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
-
 
 class LambdaMART(val boostingStrategy: BoostingStrategy,
   val numLeaves: Int,
@@ -21,11 +20,12 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
-    queryBoundy: Array[Int]): GradientBoostedDecisionTreesModel = {
+    queryBoundy: Array[Int],
+    gainTable: Array[Double]): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
     algo match {
       case Regression =>
-        LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,
+        LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,gainTable,
           boostingStrategy, numLeaves, maxSplits)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by the implementation of LambdaMART.")
@@ -39,11 +39,12 @@ object LambdaMART extends Logging {
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int],
+    gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
     numLeaves: Int,
     maxSplits: Int): GradientBoostedDecisionTreesModel = {
     new LambdaMART(boostingStrategy, numLeaves, maxSplits)
-      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy)
+      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy, gainTable)
   }
   
   private def boost(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
@@ -51,6 +52,7 @@ object LambdaMART extends Logging {
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int],
+    gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
     numLeaves: Int,
     maxSplits: Int): GradientBoostedDecisionTreesModel = {
@@ -70,18 +72,21 @@ object LambdaMART extends Logging {
     // Prepare strategy for individual trees, which use regression with variance impurity.
     val treeStrategy = boostingStrategy.treeStrategy.copy
     // val validationTol = boostingStrategy.validationTol
-    treeStrategy.algo = Regression
-    treeStrategy.impurity = Variance
+    treeStrategy.setAlgo(Regression)
+    treeStrategy.setImpurity(Variance)
     treeStrategy.assertValid()
 
     val sc= trainingData.sparkContext
     val numSamples = labelScores.length
     val numQueries = queryBoundy.length - 1
     val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultParallelism)
+    //println(">>>>>>>>>>>")
+    //println(qiMinPP.mkString(","))
+    //println(lcNumQueriesPP.mkString(","))
     val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("PDCCtrl")
 
     val dc = new DerivativeCalculator
-    dc.init(labelScores, queryBoundy)
+    dc.init(labelScores, gainTable,  queryBoundy)
     val dcBc = sc.broadcast(dc)
     val lambdas = new Array[Double](numSamples)
     val weights = new Array[Double](numSamples)
@@ -98,32 +103,37 @@ object LambdaMART extends Logging {
 
       val currentScoresBc = sc.broadcast(currentScores)
       updateDerivatives(pdcRDD, dcBc, currentScoresBc, lambdas, weights)
-      currentScoresBc.destroy(blocking=false)
+      currentScoresBc.unpersist(blocking=false)
 
       val lambdasBc = sc.broadcast(lambdas)
       val weightsBc = sc.broadcast(weights)
+
+      //println(s"Iteration $m\nlambdas: " + lambdasBc.value.slice(0,50).mkString(" "))
+//      println(s"Iteration $m: weights: " + weightsBc.value.slice(0,100).mkString(" "))
+      //logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
+
       val tree = new LambdaMARTDecisionTree(treeStrategy, numLeaves, maxSplits)
       val (model, treeScores) = tree.run(trainingData, trainingData_T, lambdasBc, weightsBc, numSamples)
-      lambdasBc.destroy(blocking=false)
-      weightsBc.destroy(blocking=false)
+      lambdasBc.unpersist(blocking=false)
+      weightsBc.unpersist(blocking=false)
       timer.stop(s"building tree $m")
 
       baseLearners(m) = model
       baseLearnerWeights(m) = learningRate
 
       Range(0, numSamples).par.foreach(si =>
-        currentScores(si) -= learningRate * treeScores(si)
+        currentScores(si) += learningRate * treeScores(si)
       )
+
       val errors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
       println(s"NDCG error sum = $errors")
+      println(s"length:"+model.topNode.internalNodes)
       // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
 
-      model.sequence("treeEnsemble.ini", model, m + 1)
+      //model.sequence("treeEnsemble.ini", model, m + 1)
       m += 1
     }
 
-    val evalNodes = Array.tabulate[Int](m)(_ + 1)
-    treeAggregatorFormat.appendTreeAggregator("treeEnsemble.ini", m + 1, evalNodes)
     timer.stop("total")
 
     println("Internal timing for LambdaMARTDecisionTree:")

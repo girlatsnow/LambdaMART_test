@@ -67,7 +67,7 @@ class NodeInfoStats(var sumCount: Int,
                     var sumSquares: Double,
                     var sumScoreWeights: Double)extends Serializable {
 
-  override def toString = s"NodeInfoStats($sumCount, $sumScores, $sumSquares, $sumScoreWeights)"
+  override def toString = s"NodeInfoStats( sumCount = $sumCount, sumTarget = $sumScores, sumSquares = $sumSquares, sumScoreWeight = $sumScoreWeights)"
 
   def canEqual(other: Any): Boolean = other.isInstanceOf[NodeInfoStats]
 
