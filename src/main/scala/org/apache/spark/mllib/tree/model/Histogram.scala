@@ -4,7 +4,7 @@ class Histogram(val numBins: Int) {
   private val _counts = new Array[Double](numBins)
   private val _scores = new Array[Double](numBins)
   private val _squares = new Array[Double](numBins)
-  private val _scoreWeights = new Array[Double](numBins)
+//  private val _scoreWeights = new Array[Double](numBins)
 
   @inline def counts = _counts
 
@@ -12,19 +12,19 @@ class Histogram(val numBins: Int) {
 
   @inline def squares = _squares
 
-  @inline def scoreWeights = _scoreWeights
+//  @inline def scoreWeights = _scoreWeights
 
   def weightedUpdate(bin: Int, score: Double, scoreWeight: Double, weight: Double = 1.0) = {
     _counts(bin) += weight
     _scores(bin) += score * weight
     _squares(bin) += score * score * weight
-    _scoreWeights(bin) += scoreWeight
+//    _scoreWeights(bin) += scoreWeight
   }
   def update(bin: Int, score: Double, scoreWeight: Double) = {
     _counts(bin) += 1
     _scores(bin) += score
     _squares(bin) += score * score
-    _scoreWeights(bin) += scoreWeight
+//    _scoreWeights(bin) += scoreWeight
   }
 
   def cumulateLeft() = {
@@ -33,7 +33,7 @@ class Histogram(val numBins: Int) {
       _counts(bin) += _counts(bin-1)
       _scores(bin) += _scores(bin-1)
       _squares(bin) += _squares(bin-1)
-      _scoreWeights(bin) += _scoreWeights(bin-1)
+//      _scoreWeights(bin) += _scoreWeights(bin-1)
       bin += 1
     }
     this
@@ -47,7 +47,7 @@ class Histogram(val numBins: Int) {
       _counts(bin) += _counts(binRight)
       _scores(bin) += _scores(binRight)
       _squares(bin) += _squares(binRight)
-      _scoreWeights(bin) += _scoreWeights(binRight)
+//      _scoreWeights(bin) += _scoreWeights(binRight)
       bin -= 1
     }
 
@@ -55,7 +55,7 @@ class Histogram(val numBins: Int) {
     _counts(0)=info.sumCount
     _scores(0)=info.sumScores
     _squares(0)=info.sumSquares
-    _scoreWeights(0)=info.sumScoreWeights
+//    _scoreWeights(0)=info.sumScoreWeights
 
     this
 

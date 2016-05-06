@@ -10,6 +10,7 @@ class DerivativeCalculator extends Serializable {
   var minScore: Double = _
   var maxScore: Double = _
   var scoreToSigmoidTableFactor: Double = _
+  val _distanceWeight2 = true  //TODO CMD PARAMETER
 
 
   var discounts: Array[Double] = _
@@ -97,7 +98,7 @@ class DerivativeCalculator extends Serializable {
     var qi = qiMin
     while (qi < qiEnd) {
       val lcMin = queryBoundy(qi) - siTotalMin
-      calcQueryDerivatives(qi, scores, lcLambdas, lcWeights, lcMin)
+      calcQueryDerivatives(qi, scores, lcLambdas, lcWeights, lcMin, distanceWeight2 = _distanceWeight2)
       qi += 1
     }
     (siTotalMin, lcLambdas, lcWeights)
@@ -256,15 +257,30 @@ class DerivativeCalculator extends Serializable {
         lcWeights(di + lcMin) += deltaWeightsHigh
       }
     }
-//    if (_normalizeQueryLambdas) {
-//      if (lambdaSum > 0) {
-//        val normFactor = (10 * math.log(1 + lambdaSum)) / lambdaSum
-//        for (i <- 0 until numDocs) {
-//          lcLambdas(lcMin + i) = lcLambdas(lcMin + i) * normFactor
-//          lcWeights(lcMin + i) = lcWeights(lcMin + i) * normFactor
-//        }
-//      }
-//    }
+
+    if(qi < 15)
+    {
+      println(s"lambdas in query $qi")
+      for(i <- 0 until numDocs)
+      {
+         print(lcLambdas(lcMin + i) + ",")
+      }
+      println()
+    }
+
+    if(_normalizeQueryLambdas)
+    {
+      if(lambdaSum > 0)
+      {
+        val normFactor = (10 * math.log(1 + lambdaSum))/lambdaSum
+        for(i <- 0 until numDocs)
+        {
+          lcLambdas(lcMin + i) = lcLambdas(lcMin + i) * normFactor
+          lcWeights(lcMin + i) = lcWeights(lcMin + i) * normFactor
+        }
+      }
+    }
+
   }
 }
 

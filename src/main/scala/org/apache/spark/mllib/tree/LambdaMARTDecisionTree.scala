@@ -19,7 +19,8 @@ import scala.collection.mutable
 
 class LambdaMARTDecisionTree(val strategy: Strategy,
   val numLeaves: Int,
-  val maxSplits: Int) extends Serializable with Logging {
+  val maxSplits: Int,
+  val initialTreeEnsemble: String) extends Serializable with Logging {
 
   strategy.assertValid()
 
@@ -99,7 +100,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       treeScores(si) = nodeId2Score(nodeIdTracker(si))
     )
 
-    val model = new OptimizedDecisionTreeModel(topNode, strategy.algo)
+    val model = new OptimizedDecisionTreeModel(topNode, strategy.algo, initialTreeEnsemble)
     (model, treeScores)
   }
 
@@ -208,8 +209,8 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       if (!isLeaf) {
         node.split = Some(split)
         val childIsLeaf = (Node.indexToLevel(nodeId) + 1) == maxDepth
-        val leftChildIsLeaf = childIsLeaf || (stats.leftImpurity == 0.0)
-        val rightChildIsLeaf = childIsLeaf || (stats.rightImpurity == 0.0)
+        val leftChildIsLeaf = childIsLeaf || (stats.leftImpurity <= 0.0)
+        val rightChildIsLeaf = childIsLeaf || (stats.rightImpurity <= 0.0)
         node.leftNode = Some(Node(Node.leftChildIndex(nodeId),
           stats.leftPredict, stats.leftImpurity, leftChildIsLeaf))
         nodeId2Score(node.leftNode.get.id) = node.leftNode.get.predict.predict
@@ -300,7 +301,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     // var gainConfidenceInSquaredStandardDeviations = ProbabilityFunctions.Probit(1.0 - (1.0 - gainConfidenceLevel) * 0.5)
     // gainConfidenceInSquaredStandardDeviations *= gainConfidenceInSquaredStandardDeviations
 
-    val entropyCoefficient = 0.1 * 1.0e-6 // an outer tuning parameters
+//    val entropyCoefficient = 0.1 * 1.0e-6 // an outer tuning parameters
     val bestRtInfo = new NodeInfoStats(-1, Double.NaN, Double.NaN, Double.NaN)
     var bestShiftedGain = Double.NegativeInfinity
     var bestThreshold = 0.0
@@ -312,12 +313,12 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       val rtCount = cumHist.counts(threshLeft).toInt
       val lteCount = nodeInfo.sumCount - rtCount
       val rtSumTarget = cumHist.scores(threshLeft)
-      val rtSumWeight = cumHist.scoreWeights(threshLeft)
+//      val rtSumWeight = cumHist.scoreWeights(threshLeft)
       val lteSumTarget = nodeInfo.sumScores - rtSumTarget
-      val lteSumWeight = nodeInfo.sumScoreWeights - rtSumWeight
+//      val lteSumWeight = nodeInfo.sumScoreWeights - rtSumWeight
       // val gain = lscores * lscores / lcnts + rscores * rscores / rcnts  gainShift >= minShiftedGain
       if (lteCount >= minInstancesPerNode && rtCount >= minInstancesPerNode) {
-        val currentShiftedGain = getLeafSplitGain(lteCount, lteSumTarget, lteSumWeight) + getLeafSplitGain(rtCount, rtSumTarget, rtSumWeight)
+        val currentShiftedGain = getLeafSplitGain(lteCount, lteSumTarget) + getLeafSplitGain(rtCount, rtSumTarget)
             //   if (entropyCoefficient > 0) {
              //    val entropyGain = nodeInfo.sumCount * math.log(nodeInfo.sumCount) - lteCount * math.log(lteCount) -
              //      rtCount * math.log(rtCount)
@@ -330,7 +331,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
           bestRtInfo.sumCount = rtCount
           bestRtInfo.sumScores = rtSumTarget
           bestRtInfo.sumSquares = cumHist.squares(threshLeft)
-          bestRtInfo.sumScoreWeights = cumHist.scoreWeights(threshLeft)
+//          bestRtInfo.sumScoreWeights = cumHist.scoreWeights(threshLeft)
           bestShiftedGain = currentShiftedGain
           bestThreshold = splits(threshLeft - 1).threshold
           bestThresholdBin = i
@@ -342,7 +343,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     //    val gtTarget = sumTargets - bestLteTarget
     //    val gtCount = totalDocInNode - bestLteCount
     val bestLeftInfo = new NodeInfoStats(nodeInfo.sumCount - bestRtInfo.sumCount, nodeInfo.sumScores - bestRtInfo.sumScores,
-      nodeInfo.sumSquares - bestRtInfo.sumSquares, nodeInfo.sumScoreWeights - bestRtInfo.sumScoreWeights)
+      nodeInfo.sumSquares - bestRtInfo.sumSquares, 0)
 
     val lteImpurity = (bestLeftInfo.sumSquares - bestLeftInfo.sumScores * bestLeftInfo.sumScores / bestLeftInfo.sumCount) / bestLeftInfo.sumCount
     val gtImpurity = (bestRtInfo.sumSquares - bestRtInfo.sumScores * bestRtInfo.sumScores / bestRtInfo.sumCount) / bestRtInfo.sumCount
@@ -357,7 +358,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     val trust = 1.0
     //println("#############################################################################################")
     //println(s"bestShiftedGain: $bestShiftedGain, gainShift: $gainShift")
-    val splitGain = (bestShiftedGain - gainShift) * trust //- usePenalty //TODO introduce trust and usePenalty
+    val splitGain = (bestShiftedGain - gainShift) //* trust - usePenalty //TODO introduce trust and usePenalty
     val inforGainStat = new InformationGainStats(splitGain, tolImpurity, lteImpurity, gtImpurity, ltePredict, gtPredict)
     val erfcArg = math.sqrt((bestShiftedGain - gainShift) * (nodeInfo.sumCount - 1) / (2 * varianceTargets * nodeInfo.sumCount))
     val gainPValue = ProbabilityFunctions.erfc(erfcArg)
@@ -365,13 +366,13 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     (bestSplitInfo, inforGainStat, gainPValue, bestLeftInfo, bestRtInfo)
   }
 
-  def getLeafSplitGain(count: Double, target: Double, weight: Double): Double = {
+  def getLeafSplitGain(count: Double, target: Double, weight: Double =0): Double = {
     //val pesuedCount = if(weight == 0.0) count else weight
-    //target * target / count
-    target * target / (weight + 1e-9)
+    target * target / count
+//    target * target / (weight + 1e-9)
   }
 
-  def CalculateSplittedLeafOutput(totalCount: Int, sumTargets: Double, sumWeights: Double): Double = {
+  def CalculateSplittedLeafOutput(totalCount: Int, sumTargets: Double, sumWeights: Double=0): Double = {
 //    val hasWeight = false
 //    val bsrMaxTreeOutput = 100.0
 //    if (!hasWeight) {
@@ -385,7 +386,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 //        sumTargets / (2 * sumWeights)
 //      }
 //    }
-    sumTargets / (sumWeights + 1e-9)
-    //sumTargets / totalCount
+//    sumTargets / (sumWeights + 1e-9)
+    sumTargets / totalCount
   }
 }

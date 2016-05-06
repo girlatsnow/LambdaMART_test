@@ -10,23 +10,25 @@ import org.apache.spark.mllib.tree.impurity.Variance
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
-import org.apache.spark.mllib.util.TreeUtils
+import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
 import org.apache.spark.rdd.RDD
 
 class LambdaMART(val boostingStrategy: BoostingStrategy,
   val numLeaves: Int,
-  val maxSplits: Int) extends Serializable with Logging {
+  val maxSplits: Int,
+  val learningStrategy: String) extends Serializable with Logging {
   def run(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     labelScores: Array[Short],
     initScores: Array[Double],
     queryBoundy: Array[Int],
-    gainTable: Array[Double]): GradientBoostedDecisionTreesModel = {
+    gainTable: Array[Double],
+	  LambdaMARTDecisionTree: String): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
     algo match {
       case Regression =>
         LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,gainTable,
-          boostingStrategy, numLeaves, maxSplits)
+          boostingStrategy, numLeaves, maxSplits, LambdaMARTDecisionTree, learningStrategy)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by the implementation of LambdaMART.")
     }
@@ -42,9 +44,11 @@ object LambdaMART extends Logging {
     gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
     numLeaves: Int,
-    maxSplits: Int): GradientBoostedDecisionTreesModel = {
-    new LambdaMART(boostingStrategy, numLeaves, maxSplits)
-      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy, gainTable)
+    maxSplits: Int,
+	  LambdaMARTDecisionTree: String,
+    learningStrategy: String): GradientBoostedDecisionTreesModel = {
+    new LambdaMART(boostingStrategy, numLeaves, maxSplits, learningStrategy)
+      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy, gainTable, LambdaMARTDecisionTree)
   }
   
   private def boost(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
@@ -55,7 +59,9 @@ object LambdaMART extends Logging {
     gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
     numLeaves: Int,
-    maxSplits: Int): GradientBoostedDecisionTreesModel = {
+    maxSplits: Int,
+	  LambdaMARTDecisionTree: String,
+    learningStrategy:String): GradientBoostedDecisionTreesModel = {
     val timer = new TimeTracker()
     timer.start("total")
     timer.start("init")
@@ -72,8 +78,8 @@ object LambdaMART extends Logging {
     // Prepare strategy for individual trees, which use regression with variance impurity.
     val treeStrategy = boostingStrategy.treeStrategy.copy
     // val validationTol = boostingStrategy.validationTol
-    treeStrategy.setAlgo(Regression)
-    treeStrategy.setImpurity(Variance)
+    treeStrategy.algo = Regression
+    treeStrategy.impurity = Variance
     treeStrategy.assertValid()
 
     val sc= trainingData.sparkContext
@@ -88,6 +94,7 @@ object LambdaMART extends Logging {
     val dc = new DerivativeCalculator
     dc.init(labelScores, gainTable,  queryBoundy)
     val dcBc = sc.broadcast(dc)
+
     val lambdas = new Array[Double](numSamples)
     val weights = new Array[Double](numSamples)
 
@@ -97,6 +104,9 @@ object LambdaMART extends Logging {
     val initErrors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
     println(s"NDCG initError sum = $initErrors")
     var m = 0
+
+    val oldRep = new Array[Double](numSamples)
+
     while (m < numIterations) {
       timer.start(s"building tree $m")
       println("\nGradient boosting tree iteration " + m)
@@ -105,6 +115,29 @@ object LambdaMART extends Logging {
       updateDerivatives(pdcRDD, dcBc, currentScoresBc, lambdas, weights)
       currentScoresBc.unpersist(blocking=false)
 
+//      val rho = 0.1
+//      if(learningStrategy == "sgd") {
+//
+//      }
+//      else if(learningStrategy == "momentum"){
+//        Range(0, numSamples).par.foreach { si =>
+//          lambdas(si) = rho * oldRep(si) + lambdas(si)
+//          oldRep(si) = lambdas(si)
+//        }
+//      }
+//      else if (learningStrategy == "adagrad"){
+//        Range(0, numSamples).par.foreach { si =>
+//          oldRep(si) += lambdas(si) * lambdas(si)
+//          lambdas(si) = lambdas(si) / math.sqrt(oldRep(si))
+//        }
+//      }
+//      else if (learningStrategy == "adadelta"){
+//        Range(0, numSamples).par.foreach { si =>
+//          oldRep(si) = rho * oldRep(si) + (1- rho)*lambdas(si)*lambdas(si)
+//          lambdas(si) = learningRate * lambdas(si) / math.sqrt(oldRep(si) + 1e-9)
+//        }
+//      }
+
       val lambdasBc = sc.broadcast(lambdas)
       val weightsBc = sc.broadcast(weights)
 
@@ -112,7 +145,7 @@ object LambdaMART extends Logging {
 //      println(s"Iteration $m: weights: " + weightsBc.value.slice(0,100).mkString(" "))
       //logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
 
-      val tree = new LambdaMARTDecisionTree(treeStrategy, numLeaves, maxSplits)
+      val tree = new LambdaMARTDecisionTree(treeStrategy, numLeaves, maxSplits, LambdaMARTDecisionTree)
       val (model, treeScores) = tree.run(trainingData, trainingData_T, lambdasBc, weightsBc, numSamples)
       lambdasBc.unpersist(blocking=false)
       weightsBc.unpersist(blocking=false)
@@ -121,9 +154,35 @@ object LambdaMART extends Logging {
       baseLearners(m) = model
       baseLearnerWeights(m) = learningRate
 
-      Range(0, numSamples).par.foreach(si =>
-        currentScores(si) += learningRate * treeScores(si)
-      )
+      val rho = 0.5
+      if(learningStrategy == "sgd") {
+        Range(0, numSamples).par.foreach(si =>
+          currentScores(si) += learningRate * treeScores(si)
+        )
+      }
+      else if(learningStrategy == "momentum"){
+        Range(0, numSamples).par.foreach { si =>
+          val deltaScore = rho * oldRep(si) + learningRate * treeScores(si)
+          currentScores(si) += deltaScore
+          oldRep(si) = deltaScore
+        }
+      }
+      else if (learningStrategy == "adagrad"){
+        Range(0, numSamples).par.foreach { si =>
+          oldRep(si) += treeScores(si) * treeScores(si)
+          currentScores(si) += learningRate * treeScores(si) / math.sqrt(oldRep(si))
+        }
+      }
+      else if (learningStrategy == "adadelta"){
+        Range(0, numSamples).par.foreach { si =>
+          oldRep(si) = rho * oldRep(si) + (1- rho)*treeScores(si)*treeScores(si)
+          currentScores(si) += learningRate * treeScores(si) / math.sqrt(oldRep(si) + 1e-9)
+        }
+      }
+
+//      Range(0, numSamples).par.foreach(si =>
+//        currentScores(si) += learningRate * treeScores(si)
+//      )
 
       val errors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
       println(s"NDCG error sum = $errors")

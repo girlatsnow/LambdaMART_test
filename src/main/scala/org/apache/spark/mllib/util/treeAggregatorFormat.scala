@@ -4,7 +4,8 @@ import java.io.{File, PrintWriter, FileOutputStream}
 
 
 object treeAggregatorFormat{
-  def appendTreeAggregator(filePath: String,
+  def appendTreeAggregator(initialTreeEnsemble: String,
+    filePath: String,
     index: Int,
     evalNodes: Array[Int],
     evalWeights: Array[Double] = null,
@@ -15,13 +16,18 @@ object treeAggregatorFormat{
     pw.append(s"[Evaluator:$index]").write("\r\n")
     pw.append(s"EvaluatorType=Aggregator").write("\r\n")
 
-    val numNodes = evalNodes.length
+
+    val numNodes = if(initialTreeEnsemble == null) evalNodes.length else evalNodes.length + 1
     val defaultWeight = 1.0
     if (evalNodes == null) {
       throw new IllegalArgumentException("there is no evaluators to be aggregated")
     } else {
       pw.append(s"NumNodes=$numNodes").write("\r\n")
       pw.append(s"Nodes=").write("")
+
+      if(initialTreeEnsemble != null) {
+        pw.append(s"I:1").write("\t")
+      }
       for (eval <- evalNodes) {
         pw.append(s"E:$eval").write("\t")
       }

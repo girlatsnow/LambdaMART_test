@@ -47,7 +47,7 @@ import scala.collection.mutable
  * @param algo algorithm type -- classification or regression
  */
 @Experimental
-class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo)
+class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo, val initialTreeEnsemble: String = null)
   extends Serializable with Saveable {
   type Lists = (List[String], List[Double], List[Double], List[Int], List[Int], List[Double], List[Double])
 
@@ -155,7 +155,10 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo)
       if (!node.isLeaf) {
         val split = node.split.get
         val stats = node.stats.get
-        splitFeatures += s"I:${split.feature+1}"
+
+        val offSet =  if(initialTreeEnsemble == null) 1 else 2
+        splitFeatures += s"I:${split.feature+offSet}"
+
         splitGains += stats.gain
         gainPValues += 0.0
         thresholds += split.threshold
