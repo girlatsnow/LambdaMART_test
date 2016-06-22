@@ -1,34 +1,35 @@
 package org.apache.spark.mllib.tree
 
-import breeze.linalg.SparseVector
+//import akka.io.Udp.SO.Broadcast
+import java.io.{File, FileOutputStream, PrintWriter}
+
+import org.apache.hadoop.fs.Path
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.examples.mllib.LambdaMARTRunner.Params
+import org.apache.spark.mllib.dataSet.dataSet
 import org.apache.spark.mllib.tree.configuration.Algo._
 import org.apache.spark.mllib.tree.configuration.BoostingStrategy
 import org.apache.spark.mllib.tree.impl.TimeTracker
 import org.apache.spark.mllib.tree.impurity.Variance
-import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
 import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
-import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
+import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
 
 class LambdaMART(val boostingStrategy: BoostingStrategy,
-  val numLeaves: Int,
-  val maxSplits: Int,
-  val learningStrategy: String) extends Serializable with Logging {
-  def run(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  val params: Params) extends Serializable with Logging {
+  def run(trainingDataSet: dataSet,
+    validateDataSet: dataSet,
     trainingData_T: RDD[(Int, Array[Array[Short]])],
-    labelScores: Array[Short],
-    initScores: Array[Double],
-    queryBoundy: Array[Int],
     gainTable: Array[Double],
-	  LambdaMARTDecisionTree: String): GradientBoostedDecisionTreesModel = {
+    feature2Gain: Array[Double]): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
+
     algo match {
       case Regression =>
-        LambdaMART.boost(trainingData, trainingData_T, labelScores, initScores, queryBoundy,gainTable,
-          boostingStrategy, numLeaves, maxSplits, LambdaMARTDecisionTree, learningStrategy)
+        LambdaMART.boost(trainingDataSet, validateDataSet, trainingData_T,gainTable,
+          boostingStrategy,params, feature2Gain)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by the implementation of LambdaMART.")
     }
@@ -36,44 +37,38 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
 }
 
 object LambdaMART extends Logging {
-  def train(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  def train(trainingDataSet: dataSet,
+    validateDataSet: dataSet,
     trainingData_T: RDD[(Int, Array[Array[Short]])],
-    labelScores: Array[Short],
-    initScores: Array[Double],
-    queryBoundy: Array[Int],
     gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
-    numLeaves: Int,
-    maxSplits: Int,
-	  LambdaMARTDecisionTree: String,
-    learningStrategy: String): GradientBoostedDecisionTreesModel = {
-    new LambdaMART(boostingStrategy, numLeaves, maxSplits, learningStrategy)
-      .run(trainingData, trainingData_T, labelScores, initScores, queryBoundy, gainTable, LambdaMARTDecisionTree)
+    params: Params,
+    feature2Gain: Array[Double]): GradientBoostedDecisionTreesModel = {
+
+    new LambdaMART(boostingStrategy,params)
+      .run(trainingDataSet, validateDataSet,trainingData_T, gainTable, feature2Gain)
   }
   
-  private def boost(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  private def boost(trainingDataSet: dataSet,
+    validateDataSet: dataSet,
     trainingData_T: RDD[(Int, Array[Array[Short]])],
-    labelScores: Array[Short],
-    initScores: Array[Double],
-    queryBoundy: Array[Int],
     gainTable: Array[Double],
     boostingStrategy: BoostingStrategy,
-    numLeaves: Int,
-    maxSplits: Int,
-	  LambdaMARTDecisionTree: String,
-    learningStrategy:String): GradientBoostedDecisionTreesModel = {
+    params: Params,
+    feature2Gain: Array[Double]): GradientBoostedDecisionTreesModel = {
     val timer = new TimeTracker()
     timer.start("total")
     timer.start("init")
 
     boostingStrategy.assertValid()
-
+    val learningStrategy = params.learningStrategy
     // Initialize gradient boosting parameters
-    val numIterations = boostingStrategy.numIterations
-    val baseLearners = new Array[OptimizedDecisionTreeModel](numIterations)
-    val baseLearnerWeights = new Array[Double](numIterations)
+    val numPhases = params.numIterations.length
+    val numTrees = params.numIterations.sum //different phases different trees number.
+    var baseLearners = new Array[OptimizedDecisionTreeModel](numTrees)
+    var baseLearnerWeights = new Array[Double](numTrees)
     // val loss = boostingStrategy.loss
-    val learningRate = boostingStrategy.learningRate
+    val learningRate = params.learningRate
     
     // Prepare strategy for individual trees, which use regression with variance impurity.
     val treeStrategy = boostingStrategy.treeStrategy.copy
@@ -82,8 +77,14 @@ object LambdaMART extends Logging {
     treeStrategy.impurity = Variance
     treeStrategy.assertValid()
 
-    val sc= trainingData.sparkContext
-    val numSamples = labelScores.length
+
+    val trainingData = trainingDataSet.getData()
+    val label = trainingDataSet.getLabel()
+    val queryBoundy = trainingDataSet.getQueryBoundy()
+    val initScores = trainingDataSet.getScore()
+
+    val sc = trainingData.sparkContext
+    val numSamples = label.length
     val numQueries = queryBoundy.length - 1
     val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultParallelism)
     //println(">>>>>>>>>>>")
@@ -91,10 +92,23 @@ object LambdaMART extends Logging {
     //println(lcNumQueriesPP.mkString(","))
     val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("PDCCtrl")
 
-    val dc = new DerivativeCalculator
-    dc.init(labelScores, gainTable,  queryBoundy)
-    val dcBc = sc.broadcast(dc)
+    val learningRates = params.learningRate
+    val distanceWeight2 = params.distanceWeight2
+    val baselineAlpha = params.baselineAlpha
+    val secondMs = params.secondaryMS
+    val secondLe = params.secondaryLE
+    val secondGains = params.secondGains
+    val secondaryInverseMacDcg = params.secondaryInverseMaxDcg
+    val discounts = params.discounts
+    val baselineDcgs = params.baselineDcgs
 
+    val dc = new DerivativeCalculator
+    //sigma = params.learningRate(0)
+    dc.init(label, gainTable, queryBoundy,
+      learningRates(0), distanceWeight2, baselineAlpha,
+      secondMs, secondLe, secondGains, secondaryInverseMacDcg, discounts, baselineDcgs)
+
+    val dcBc = sc.broadcast(dc)
     val lambdas = new Array[Double](numSamples)
     val weights = new Array[Double](numSamples)
 
@@ -103,97 +117,199 @@ object LambdaMART extends Logging {
     val currentScores = initScores
     val initErrors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
     println(s"NDCG initError sum = $initErrors")
+
     var m = 0
+    var numIterations = 0
 
+    var earlystop = false
+    val useEarlystop = params.useEarlystop
+    var phase = 0
     val oldRep = new Array[Double](numSamples)
+    val validationSpan = params.validationSpan
+    val multiplier_Score = 1.0
+    while(phase < numPhases && !earlystop){
+      numIterations += params.numIterations(phase)
+      //initial derivativeCalculator for every phase
+      val dcPhase = new DerivativeCalculator
+      dcPhase.init(label, gainTable, queryBoundy, learningRates(phase),
+        distanceWeight2, baselineAlpha,
+        secondMs, secondLe, secondGains, secondaryInverseMacDcg, discounts, baselineDcgs)
 
-    while (m < numIterations) {
-      timer.start(s"building tree $m")
-      println("\nGradient boosting tree iteration " + m)
+      val dcPhaseBc = sc.broadcast(dcPhase)
 
-      val currentScoresBc = sc.broadcast(currentScores)
-      updateDerivatives(pdcRDD, dcBc, currentScoresBc, lambdas, weights)
-      currentScoresBc.unpersist(blocking=false)
+      while (m < numIterations && !earlystop) {
+        timer.start(s"building tree $m")
+        println("\nGradient boosting tree iteration " + m)
 
-//      val rho = 0.1
-//      if(learningStrategy == "sgd") {
-//
-//      }
-//      else if(learningStrategy == "momentum"){
-//        Range(0, numSamples).par.foreach { si =>
-//          lambdas(si) = rho * oldRep(si) + lambdas(si)
-//          oldRep(si) = lambdas(si)
-//        }
-//      }
-//      else if (learningStrategy == "adagrad"){
-//        Range(0, numSamples).par.foreach { si =>
-//          oldRep(si) += lambdas(si) * lambdas(si)
-//          lambdas(si) = lambdas(si) / math.sqrt(oldRep(si))
-//        }
-//      }
-//      else if (learningStrategy == "adadelta"){
-//        Range(0, numSamples).par.foreach { si =>
-//          oldRep(si) = rho * oldRep(si) + (1- rho)*lambdas(si)*lambdas(si)
-//          lambdas(si) = learningRate * lambdas(si) / math.sqrt(oldRep(si) + 1e-9)
-//        }
-//      }
+        val iterationBc = sc.broadcast(m)
+        val currentScoresBc = sc.broadcast(currentScores)
+        updateDerivatives(pdcRDD, dcPhaseBc, currentScoresBc, iterationBc, lambdas, weights)
+        currentScoresBc.unpersist(blocking=false)
+        iterationBc.unpersist(blocking=false)
+        /**
+        val pwLambda = new PrintWriter(new FileOutputStream(new File("lambdas.txt"), true))
+        pwLambda.write(lambdas.mkString("\n"))
+        pwLambda.close() ***/
 
-      val lambdasBc = sc.broadcast(lambdas)
-      val weightsBc = sc.broadcast(weights)
+        /*****
+        //adaptive lambda
+        if(params.active_lambda_learningStrategy) {
+          val rho_lambda = params.rho_lambda
+          if (learningStrategy == "sgd") {
 
-      //println(s"Iteration $m\nlambdas: " + lambdasBc.value.slice(0,50).mkString(" "))
-//      println(s"Iteration $m: weights: " + weightsBc.value.slice(0,100).mkString(" "))
-      //logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
+          }
+          else if (learningStrategy == "momentum") {
+            Range(0, numSamples).par.foreach { si =>
+              lambdas(si) = rho_lambda * oldRep(si) + lambdas(si)
+              oldRep(si) = lambdas(si)
+            }
+          }
+          else if (learningStrategy == "adagrad") {
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) += lambdas(si) * lambdas(si)
+              lambdas(si) = lambdas(si) / math.sqrt(oldRep(si) + 1e-9)
+            }
+          }
+          else if (learningStrategy == "adadelta") {
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) = rho_lambda * oldRep(si) + (1 - rho_lambda) * lambdas(si) * lambdas(si)
+              lambdas(si) = learningRate(phase) * lambdas(si) / scala.math.sqrt(oldRep(si) + 1e-9)
+            }
+          }
+        } *****/
 
-      val tree = new LambdaMARTDecisionTree(treeStrategy, numLeaves, maxSplits, LambdaMARTDecisionTree)
-      val (model, treeScores) = tree.run(trainingData, trainingData_T, lambdasBc, weightsBc, numSamples)
-      lambdasBc.unpersist(blocking=false)
-      weightsBc.unpersist(blocking=false)
-      timer.stop(s"building tree $m")
+        val lambdasBc = sc.broadcast(lambdas)
+        val weightsBc = sc.broadcast(weights)
 
-      baseLearners(m) = model
-      baseLearnerWeights(m) = learningRate
+        logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
 
-      val rho = 0.5
-      if(learningStrategy == "sgd") {
+        val featureUseCount = new Array[Int](trainingData.count().toInt)
+        var TrainingDataUse = trainingData
+        if(params.ffraction < 1.0)
+        {
+          TrainingDataUse = trainingData.filter(item =>IsSeleted(params.ffraction))
+        }
+
+        val tree = new LambdaMARTDecisionTree(treeStrategy, params.minInstancesPerNode(phase),
+          params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
+        val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
+          params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
+          params.featureReusePenalty, feature2Gain, params.sampleWeights)
+        lambdasBc.unpersist(blocking=false)
+        weightsBc.unpersist(blocking=false)
+        timer.stop(s"building tree $m")
+
+        baseLearners(m) = model
+        baseLearnerWeights(m) = 1.0
+
         Range(0, numSamples).par.foreach(si =>
-          currentScores(si) += learningRate * treeScores(si)
+          currentScores(si) += multiplier_Score * treeScores(si)
         )
-      }
-      else if(learningStrategy == "momentum"){
-        Range(0, numSamples).par.foreach { si =>
-          val deltaScore = rho * oldRep(si) + learningRate * treeScores(si)
-          currentScores(si) += deltaScore
-          oldRep(si) = deltaScore
-        }
-      }
-      else if (learningStrategy == "adagrad"){
-        Range(0, numSamples).par.foreach { si =>
-          oldRep(si) += treeScores(si) * treeScores(si)
-          currentScores(si) += learningRate * treeScores(si) / math.sqrt(oldRep(si))
-        }
-      }
-      else if (learningStrategy == "adadelta"){
-        Range(0, numSamples).par.foreach { si =>
-          oldRep(si) = rho * oldRep(si) + (1- rho)*treeScores(si)*treeScores(si)
-          currentScores(si) += learningRate * treeScores(si) / math.sqrt(oldRep(si) + 1e-9)
-        }
-      }
+        //testing continue training
 
-//      Range(0, numSamples).par.foreach(si =>
-//        currentScores(si) += learningRate * treeScores(si)
-//      )
+        val iterOutput = 0
+        if(iterOutput == m){
+          val path = s"currentScoresAt$iterOutput.txt"
+          val pwCS = new PrintWriter(new FileOutputStream(new File(path), false))
+          pwCS.write(currentScores.mkString(",") + "\n")
+          pwCS.close()
+        }
 
-      val errors = evaluateErrors(pdcRDD, dcBc, currentScores, numQueries)
-      println(s"NDCG error sum = $errors")
-      println(s"length:"+model.topNode.internalNodes)
-      // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
 
-      //model.sequence("treeEnsemble.ini", model, m + 1)
-      m += 1
+        /**
+        //adaptive leaves value
+        if(params.active_leaves_value_learningStrategy){
+          val rho_leave = params.rho_leave
+          if(learningStrategy == "sgd") {
+            Range(0, numSamples).par.foreach(si =>
+              currentScores(si) += learningRate(phase) * treeScores(si)
+            )
+          }
+          else if(learningStrategy == "momentum"){
+            Range(0, numSamples).par.foreach { si =>
+              val deltaScore = rho_leave * oldRep(si) + learningRate(phase) * treeScores(si)
+              currentScores(si) += deltaScore
+              oldRep(si) = deltaScore
+            }
+          }
+          else if (learningStrategy == "adagrad"){
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) += treeScores(si) * treeScores(si)
+              currentScores(si) += learningRate(phase) * treeScores(si) / math.sqrt(oldRep(si) + 1e-9)
+            }
+          }
+          else if (learningStrategy == "adadelta"){
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) = rho_leave * oldRep(si) + (1- rho_leave)*treeScores(si)*treeScores(si)
+              currentScores(si) += learningRate(phase) * treeScores(si) / math.sqrt(oldRep(si) + 1e-9)
+            }
+          }
+        } ***/
+
+
+        //validate the model
+       // println(s"validationDataSet: $validateDataSet")
+
+        if(validateDataSet != null && 0 == (m % validationSpan) && useEarlystop){
+          val numQueries_V = validateDataSet.getQueryBoundy().length - 1
+          val (qiMinPP_V, lcNumQueriesPP_V) = TreeUtils.getPartitionOffsets(numQueries_V, sc.defaultParallelism)
+          //println(s"")
+          val pdcRDD_V = sc.parallelize(qiMinPP_V.zip(lcNumQueriesPP_V)).cache().setName("PDCCtrl_V")
+
+          val dc_v = new DerivativeCalculator
+          dc_v.init(validateDataSet.getLabel(), gainTable, validateDataSet.getQueryBoundy(),
+            learningRates(phase), params.distanceWeight2, baselineAlpha,
+            secondMs, secondLe, secondGains, secondaryInverseMacDcg, discounts, baselineDcgs)
+
+          val currentBaseLearners = new Array[OptimizedDecisionTreeModel](m+1)
+          val currentBaselearnerWeights = new Array[Double](m+1)
+          baseLearners.copyToArray(currentBaseLearners, 0, m+1)
+          baseLearnerWeights.copyToArray(currentBaselearnerWeights, 0, m+1)
+          val currentModel = new GradientBoostedDecisionTreesModel(Regression, currentBaseLearners, currentBaselearnerWeights)
+          val currentValidateScore = new Array[Double](validateDataSet.getLabel().length)
+
+          //val currentValidateScore_Bc = sc.broadcast(currentValidateScore)
+          val currentModel_Bc = sc.broadcast(currentModel)
+
+          validateDataSet.getDataTransposed().map{ item =>
+            (item._1, currentModel_Bc.value.predict(item._2))
+          }.collect().foreach{case (sid, score) =>
+            currentValidateScore(sid) = score
+          }
+
+          println(s"currentScores: ${currentValidateScore.mkString(",")}")
+
+          val errors = evaluateErrors(pdcRDD_V, sc.broadcast(dc_v), currentValidateScore, numQueries_V)
+
+          println(s"validation errors: $errors")
+
+          if(errors < 1.0e-6){
+            earlystop = true
+            baseLearners = currentBaseLearners
+            baseLearnerWeights = currentBaselearnerWeights
+          }
+          currentModel_Bc.unpersist(blocking = false)
+        }
+        val errors = evaluateErrors(pdcRDD, dcPhaseBc, currentScores, numQueries)
+
+        val pw = new PrintWriter(new FileOutputStream(new File("ndcg.txt"), true))
+        pw.write(errors.toString + "\n")
+        pw.close()
+
+        println(s"NDCG error sum = $errors")
+        println(s"length:"+model.topNode.internalNodes)
+        // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
+        //model.sequence("treeEnsemble.ini", model, m + 1)
+        m += 1
+      }
+      phase += 1
     }
 
     timer.stop("total")
+
+    val outPath = new Path(params.outputNdcgFilename)
+    val fs = TreeUtils.getFileSystem(trainingData.context.getConf, outPath)
+    fs.copyFromLocalFile(true, true, new Path("ndcg.txt"), outPath)
 
     println("Internal timing for LambdaMARTDecisionTree:")
     println(s"$timer")
@@ -207,13 +323,15 @@ object LambdaMART extends Logging {
   def updateDerivatives(pdcRDD: RDD[(Int, Int)],
     dcBc: Broadcast[DerivativeCalculator],
     currentScoresBc: Broadcast[Array[Double]],
+    iterationBc: Broadcast[Int],
     lambdas: Array[Double],
     weights: Array[Double]): Unit = {
     val partDerivs = pdcRDD.mapPartitions { iter =>
       val dc = dcBc.value
       val currentScores = currentScoresBc.value
+      val iteration = iterationBc.value
       iter.map { case (qiMin, lcNumQueries) =>
-        dc.getPartDerivatives(currentScores, qiMin, qiMin + lcNumQueries)
+        dc.getPartDerivatives(currentScores, qiMin, qiMin + lcNumQueries, iteration)
       }
     }.collect()
     partDerivs.par.foreach { case (siMin, lcLambdas, lcWeights) =>
@@ -235,7 +353,19 @@ object LambdaMART extends Logging {
         dc.getPartErrors(currentScores, qiMin, qiMin + lcNumQueries)
       }
     }.sum()
-    currentScoresBc.destroy(blocking=false)
+    currentScoresBc.unpersist(blocking=false)
     sumErrors / numQueries
   }
+
+  def IsSeleted(ffraction: Double): Boolean = {
+    val randomNum = scala.util.Random.nextDouble()
+    var active = false
+    if(randomNum < ffraction)
+    {
+      active = true
+    }
+    active
+  }
+
 }
+

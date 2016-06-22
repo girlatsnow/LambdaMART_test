@@ -47,7 +47,7 @@ import scala.collection.mutable
  * @param algo algorithm type -- classification or regression
  */
 @Experimental
-class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo, val initialTreeEnsemble: String = null)
+class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo, val expandTreeEnsemble: Boolean = false)
   extends Serializable with Saveable {
   type Lists = (List[String], List[Double], List[Double], List[Int], List[Int], List[Double], List[Double])
 
@@ -156,7 +156,7 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo, val initialT
         val split = node.split.get
         val stats = node.stats.get
 
-        val offSet =  if(initialTreeEnsemble == null) 1 else 2
+        val offSet =  if(expandTreeEnsemble) 2 else 1
         splitFeatures += s"I:${split.feature+offSet}"
 
         splitGains += stats.gain
@@ -180,6 +180,8 @@ class OptimizedDecisionTreeModel(val topNode: Node, val algo: Algo, val initialT
     val (splitFeatures, splitGains, gainPValues, lteChildren, gtChildren, thresholds, outputs) = reformatted
 
     val pw = new PrintWriter(new FileOutputStream(new File(path), true))
+    if(1 == modelId)
+        pw.write(s"\n")
     pw.write(s"[Evaluator:$modelId]\n")
     pw.write("EvaluatorType=DecisionTree\n")
     pw.write(s"NumInternalNodes=${topNode.internalNodes}\n")
