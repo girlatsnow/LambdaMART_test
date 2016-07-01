@@ -4,10 +4,10 @@ import breeze.linalg.SparseVector
 import org.apache.hadoop.fs.Path
 import org.apache.spark.mllib.dataSet.{dataSet, dataSetLoader}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
-import org.apache.spark.mllib.tree.configuration._
+import org.apache.spark.mllib.tree.config.Algo
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
-import org.apache.spark.mllib.tree.{DerivativeCalculator, LambdaMART}
+import org.apache.spark.mllib.tree.{DerivativeCalculator, LambdaMART, config}
 import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
@@ -36,10 +36,11 @@ object LambdaMARTRunner {
                var expandTreeEnsemble: Boolean = false,
                var featureIniFile: String = null,
                var gainTableStr: String = null,
-               var algo: String = "Regression",
+               var algo: String = "LambdaMart",
                var learningStrategy: String = "sgd",
                var maxDepth: Int = 8,
                var numLeaves: Int = 0,
+               var numPruningLeaves: Int = 0,
                var numIterations: Array[Int] = null,
                var maxSplits: Int = 128,
                var learningRate: Array[Double] = null,
@@ -80,12 +81,12 @@ object LambdaMARTRunner {
 
     override def toString: String = {
       val propertiesStr = s"trainingData = $trainingData\nqueryBoundy = $queryBoundy\nlabel = $label\ninitScores = $initScores\n" +
-        s"testData = $testData\ntestQueryBound = $testQueryBound\ntestLabel = $testLabel\ntestSpan = $testSpan" +
+        s"testData = $testData\ntestQueryBound = $testQueryBound\ntestLabel = $testLabel\ntestSpan = $testSpan\n" +
         s"sampleFeaturePercent = $sampleFeaturePercent\nsampleQueryPercent = $sampleQueryPercent" +
         s"outputTreeEnsemble = $outputTreeEnsemble\nfeatureNoToFriendlyName = $featureNoToFriendlyName\nvalidationData = $validationData\n" +
         s"queryBoundyValidate = $queryBoundyValidate\ninitScoreValidate = $initScoreValidate\nlabelValidate = $labelValidate\n" +
         s"expandTreeEnsemble = $expandTreeEnsemble\nfeatureIniFile = $featureIniFile\ngainTableStr = $gainTableStr\n" +
-        s"algo = $algo\nmaxDepth = $maxDepth\nnumLeaves = $numLeaves\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
+        s"algo = $algo\nmaxDepth = $maxDepth\nnumLeaves = $numLeaves\nnumPruningLeaves = $numPruningLeaves\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
         s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsecondaryMS = $secondaryMS\n" +
         s"secondaryLE = $secondaryLE\nsigma = $sigma\ndistanceWeight2 = $distanceWeight2\nbaselineAlphaFilename = $baselineAlphaFilename\nentropyCoefft = $entropyCoefft\n" +
         s"featureFirstUsePenalty = $featureFirstUsePenalty\nfeatureReusePenalty = $featureReusePenalty\nlearningStrategy = $learningStrategy\noutputNdcgFilename = $outputNdcgFilename\n" +
@@ -164,6 +165,9 @@ object LambdaMARTRunner {
       opt[Int]("numLeaves") optional() foreach { x =>
         defaultParams.numLeaves = x
       } text (s"num of leaves per tree, default: ${defaultParams.numLeaves}. Take precedence over --maxDepth.")
+      opt[Int]("numPruningLeaves") optional() foreach { x =>
+        defaultParams.numPruningLeaves = x
+      } text (s"num of leaves per tree after pruning, default: ${defaultParams.numPruningLeaves}.")
       opt[String]("numIterations") optional() foreach { x =>
         defaultParams.numIterations = x.split(":").map(_.toInt)
       } text (s"number of iterations of boosting," + s" default: ${defaultParams.numIterations}")
@@ -173,13 +177,13 @@ object LambdaMARTRunner {
       opt[Int]("maxSplits") optional() foreach { x =>
         defaultParams.maxSplits = x
       } text (s"max Nodes to be split simultaneously, default: ${defaultParams.maxSplits}") validate { x =>
-        if (x > 0 && x <= 128) success else failure("value <maxSplits> incorrect; should be between 1 and 128.")
+        if (x > 0 && x <= 512) success else failure("value <maxSplits> incorrect; should be between 1 and 512.")
       }
       opt[String]("learningRate") optional() foreach { x =>
         defaultParams.learningRate = x.split(":").map(_.toDouble)
       } text (s"learning rate of the score update, default: ${defaultParams.learningRate}")
       opt[Int]("testSpan") optional() foreach { x =>
-        defaultParams.validationSpan = x
+        defaultParams.testSpan = x
       } text (s"test span")
       opt[Int]("numPartitions") optional() foreach { x =>
         defaultParams.validationSpan = x
@@ -291,8 +295,8 @@ object LambdaMARTRunner {
         require(loaded.length == numSamples, s"lengthOfInitScores: ${loaded.length} != numSamples: $numSamples")
         loaded
       }
-      var queryBoundy = dataSetLoader.loadQueryBoundy(sc, params.queryBoundy)
-      require(queryBoundy.last == numSamples, s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
+      var queryBoundy = if (params.queryBoundy!=null) dataSetLoader.loadQueryBoundy(sc, params.queryBoundy) else null
+      require(queryBoundy.last == numSamples || queryBoundy==null, s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
       val numQuery = queryBoundy.length - 1
       println(s"num of data query: $numQuery")
 
@@ -304,21 +308,21 @@ object LambdaMARTRunner {
 
       if (params.sampleQueryPercent < 1) {
         // sampling
-        label = getSampleLabels(sampleQueryId, queryBoundy, label)
+        label = dataSetLoader.getSampleLabels(sampleQueryId, queryBoundy, label)
         println(s"num of sampling labels: ${label.length}")
-        initScores = getSampleInitScores(sampleQueryId, queryBoundy, initScores, label.length)
+        initScores = dataSetLoader.getSampleInitScores(sampleQueryId, queryBoundy, initScores, label.length)
         require(label.length == initScores.length, s"num of labels ${label.length} does not match with initScores ${initScores.length}!")
       }
       var trainingData = loadTrainingData(sc, params.trainingData, sc.defaultMinPartitions, sampleQueryId, queryBoundy, label.length)
 
       if (params.sampleQueryPercent < 1) {
-        queryBoundy = getSampleQueryBound(sampleQueryId, queryBoundy)
+        queryBoundy = dataSetLoader.getSampleQueryBound(sampleQueryId, queryBoundy)
         require(queryBoundy.last == label.length, s"QueryBoundy ${queryBoundy.last} does not match with data ${label.length} !")
       }
       val numFeats = trainingData.count().toInt
       println(s"numFeats: $numFeats")
 
-      trainingData = getSampleFeatureData(sc, trainingData, params.sampleFeaturePercent)
+      trainingData = dataSetLoader.getSampleFeatureData(sc, trainingData, params.sampleFeaturePercent)
       val trainingData_T = genTransposedData(trainingData, numFeats, label.length)
       val trainingDataSet = new dataSet(label, initScores, queryBoundy, trainingData)
 
@@ -333,7 +337,7 @@ object LambdaMARTRunner {
           dataSetLoader.loadInitScores(sc, params.initScoreValidate)
         }
 
-        val queryBoundyV = dataSetLoader.loadQueryBoundy(sc, params.queryBoundyValidate)
+        val queryBoundyV = if(params.queryBoundy!=null)dataSetLoader.loadQueryBoundy(sc, params.queryBoundyValidate) else null
 
         validtionDataSet = new dataSet(labelV, initScoreV, queryBoundyV, dataTransposed = validationData)
       }
@@ -342,7 +346,7 @@ object LambdaMARTRunner {
 
       val gainTable = params.gainTableStr.split(':').map(_.toDouble)
 
-      val boostingStrategy = BoostingStrategy.defaultParams(params.algo)
+      val boostingStrategy = config.BoostingStrategy.defaultParams(params.algo)
       boostingStrategy.treeStrategy.setMaxDepth(params.maxDepth)
 
       //extract secondGain and secondInverseMaxDcg
@@ -370,7 +374,7 @@ object LambdaMARTRunner {
       }
 
       val feature2Gain = new Array[Double](trainingDataSet.getData().count().toInt)
-      if (params.algo == "Regression") {
+      if (params.algo == "LambdaMart") {
         val startTime = System.nanoTime()
         val model = LambdaMART.train(trainingDataSet, validtionDataSet, trainingData_T, gainTable,
           boostingStrategy, params, feature2Gain)
@@ -485,8 +489,8 @@ object LambdaMARTRunner {
   }
 
   def loadTestData(sc: SparkContext, path: String): RDD[Vector] = {
-    //    sc.textFile(path).map{line => Vectors.dense(line.split(",").map(_.toDouble))}
-    sc.textFile(path).map { line => Vectors.dense(line.split("#")(1).split(",").map(_.toDouble)) }
+        sc.textFile(path).map{line => Vectors.dense(line.split(",").map(_.toDouble))}
+//    sc.textFile(path).map { line => Vectors.dense(line.split("#")(1).split(",").map(_.toDouble)) }
 
     //    val testData = sc.textFile(path).map {line => line.split("#")(1).split(",").map(_.toDouble)}
     //    val testTrans = testData.zipWithIndex.flatMap {
@@ -499,32 +503,6 @@ object LambdaMARTRunner {
     //        indexedRow => indexedRow.toSeq.sortBy(_._1).map(_._2).toArray
     //      }
     //    testT.map(line => Vectors.dense(line))
-  }
-
-  def loadlabelScores(sc: SparkContext, path: String): Array[Short] = {
-    sc.textFile(path).first().split(',').map(_.toShort)
-  }
-
-  def loadInitScores(sc: SparkContext, path: String): Array[Double] = {
-    sc.textFile(path).first().split(',').map(_.toDouble)
-  }
-
-  def loadQueryBoundy(sc: SparkContext, path: String): Array[Int] = {
-    sc.textFile(path).first().split(',').map(_.toInt)
-  }
-
-  def loadThresholdMap(sc: SparkContext, path: String, numFeats: Int): Array[Array[Double]] = {
-    val thresholdMapTuples = sc.textFile(path).map { line =>
-      val fields = line.split("#", 2)
-      (fields(0).toInt, fields(1).split(',').map(_.toDouble))
-    }.collect()
-    val numFeatsTM = thresholdMapTuples.length
-    assert(numFeats == numFeatsTM, s"ThresholdMap file contains $numFeatsTM features that != $numFeats")
-    val thresholdMap = new Array[Array[Double]](numFeats)
-    thresholdMapTuples.foreach { case (fi, thresholds) =>
-      thresholdMap(fi) = thresholds
-    }
-    thresholdMap
   }
 
   def genTransposedData(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
@@ -581,75 +559,18 @@ object LambdaMARTRunner {
     trainingData_T
   }
 
-  def getSampleLabels(testQueryId: Array[Int], QueryBound: Array[Int], labels: Array[Short]): Array[Short] = {
-    println("parse test labels")
-    val testLabels = new Array[Short](labels.length)
-    var it = 0
-    var icur = 0
-    while (it < testQueryId.length) {
-      val query = testQueryId(it)
-      for (is <- QueryBound(query) until QueryBound(query + 1)) {
-        testLabels(icur) = labels(is)
-        icur += 1
-      }
-      it += 1
-    }
-    testLabels.dropRight(labels.length - icur)
-  }
 
-  def getSampleInitScores(trainingQueryId: Array[Int], QueryBound: Array[Int], scores: Array[Double], len: Int): Array[Double] = {
-    println("parse init scores")
-    val trainingScores = new Array[Double](len)
-    var it = 0
-    var icur = 0
-    while (it < trainingQueryId.length) {
-      val query = trainingQueryId(it)
-      for (is <- QueryBound(query) until QueryBound(query + 1)) {
-        trainingScores(icur) = scores(is)
-        icur += 1
-      }
-      it += 1
-    }
-    trainingScores
-  }
-
-  def getSampleQueryBound(QueryId: Array[Int], queryBoundy: Array[Int]): Array[Int] = {
-    println("get query bound")
-    val res = new Array[Int](QueryId.length + 1)
-    res(0) = 0
-    var qid = 0
-    while (qid < QueryId.length) {
-      res(qid + 1) = res(qid) + queryBoundy(QueryId(qid) + 1) - queryBoundy(QueryId(qid))
-      qid += 1
-    }
-    res
-  }
-
-  def getSampleFeatureData(sc: SparkContext, trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])], sampleFeatPct: Double) = {
-    if (sampleFeatPct < 1.0) {
-      var rdd = trainingData.sample(false, sampleFeatPct)
-      rdd = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
-        case Some(np) => rdd.sortBy(x => x._1, numPartitions = np)
-        case None => rdd
-      }
-      val numFeats_S = rdd.count()
-      println(s"numFeats_sampling: $numFeats_S")
-      println(s"numPartitions_sampling: ${rdd.partitions.length}")
-      trainingData.unpersist(blocking = false)
-      rdd
-    } else trainingData
-  }
 
   def testModel(sc: SparkContext, model: GradientBoostedDecisionTreesModel, params: Params, gainTable: Array[Double]): Array[Double] = {
     val testData = loadTestData(sc, params.testData).cache().setName("TestData")
     println(s"numTestFeature: ${testData.first().toArray.length}")
     val numTest = testData.count()
     println(s"numTest: $numTest")
-    val testLabels = loadlabelScores(sc, params.testLabel)
+    val testLabels = dataSetLoader.loadlabelScores(sc, params.testLabel)
 
     println(s"numTestLabels: ${testLabels.length}")
     require(testLabels.length == numTest, s"lengthOfLabels: ${testLabels.length} != numTestSamples: $numTest")
-    val testQueryBound = loadQueryBoundy(sc, params.testQueryBound)
+    val testQueryBound = dataSetLoader.loadQueryBoundy(sc, params.testQueryBound)
     require(testQueryBound.last == numTest, s"TestQueryBoundy ${testQueryBound.last} does not match with test data $numTest!")
 
     val rate = params.testSpan

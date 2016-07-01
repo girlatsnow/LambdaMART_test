@@ -17,32 +17,26 @@
 
 package org.apache.spark.mllib.tree.model.ensemblemodels
 
-import scala.collection.mutable
-
 import com.github.fommil.netlib.BLAS.{getInstance => blas}
-import org.json4s._
-import org.json4s.JsonDSL._
-import org.json4s.jackson.JsonMethods._
-
-import org.apache.spark.{Logging, SparkContext}
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.mllib.regression.LabeledPoint
-import org.apache.spark.mllib.tree.configuration.Algo
-import org.apache.spark.mllib.tree.configuration.Algo._
+import org.apache.spark.mllib.tree.config.Algo
+import org.apache.spark.mllib.tree.config.Algo._
 import org.apache.spark.mllib.tree.configuration.EnsembleCombiningStrategy._
 import org.apache.spark.mllib.tree.loss.Loss
+import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
 import org.apache.spark.mllib.util.{Loader, Saveable}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.util.Utils
+import org.apache.spark.{Logging, SparkContext}
+import org.json4s.JsonDSL._
+import org.json4s._
+import org.json4s.jackson.JsonMethods._
 
-import org.apache.spark.mllib.tree.model.node.Node
-import org.apache.spark.mllib.tree.model.Predict
-import org.apache.spark.mllib.tree.model.Split
-import org.apache.spark.mllib.tree.model.InformationGainStats
-import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
+import scala.collection.mutable
 
 /**
  * :: Experimental ::

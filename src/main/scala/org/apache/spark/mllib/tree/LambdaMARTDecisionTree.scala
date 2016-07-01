@@ -3,7 +3,7 @@ package org.apache.spark.mllib.tree
 import breeze.linalg.SparseVector
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.mllib.tree.configuration.Strategy
+import org.apache.spark.mllib.tree.config.Strategy
 import org.apache.spark.mllib.tree.impl._
 import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
 import org.apache.spark.mllib.tree.model.node._
@@ -15,6 +15,7 @@ import org.apache.spark.rdd.RDD
 
 import scala.collection.immutable.BitSet
 import scala.collection.mutable
+
 
 class LambdaMARTDecisionTree(val strategy: Strategy,
   val phaseMinInstancesPerNode: Int,
@@ -36,7 +37,8 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     featureFirstUsePenalty: Double,
     featureReusePenalty: Double,
     feature2Gain: Array[Double],
-    sampleWeights: Array[Double]) = {
+    sampleWeights: Array[Double],
+          numPruningLeaves:Int) = {
 
     val timer = new TimeTracker()
 
@@ -98,15 +100,39 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
       nodeQueue.dequeue()._1.isLeaf = true
     }
 
+
+
+    println("print topNode")
+    println(s"numDescendants: ${topNode.numDescendants}, curLeaves: $curLeaves")
+
+    val treeScores = new Array[Double](numSamples)
+
+
+    if(numPruningLeaves>0) {
+      timer.start("pruning")
+      val mergedNodes = pruneNodes(topNode, curLeaves, numPruningLeaves, maxDepth)
+      println("print topNode after pruning")
+      println(s"numDescendants: ${topNode.numDescendants}")
+
+      Range(0, numSamples).par.foreach { si =>
+        while (mergedNodes(nodeIdTracker(si)) == 1) {
+          nodeIdTracker(si) = Node.parentIndex(nodeIdTracker(si))
+        }
+        treeScores(si) = nodeId2Score(nodeIdTracker(si))
+      }
+      timer.stop("pruning")
+    }
+    else{
+
+      Range(0, numSamples).par.foreach { si =>
+        treeScores(si) = nodeId2Score(nodeIdTracker(si))
+      }
+    }
     timer.stop("total")
 
     println("Internal timing for LambdaMARTDecisionTree:")
     println(s"$timer")
 
-    val treeScores = new Array[Double](numSamples)
-    Range(0, numSamples).par.foreach(si =>
-      treeScores(si) = nodeId2Score(nodeIdTracker(si))
-    )
 
     val model = new OptimizedDecisionTreeModel(topNode, strategy.algo, expandTreeEnsemble)
     (model, treeScores)
@@ -137,6 +163,48 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     assert(mutableNodes.nonEmpty, s"LambdaMARTDecisionTree selected empty nodes. Error for unknown reason.")
     // Convert mutable maps to immutable ones.
     (mutableNodes.toArray, mutableNodesInfo.toArray, mutableNodeId2NodeNo.toMap)
+  }
+  def pruneNodes(topNode:Node, curLeaves:Int, numLeaves:Int, maxDepth:Int): Array[Int] ={
+    val id2Node= new mutable.HashMap[Int, Node]()
+    val mergedNodes = Array.fill((math.pow(2,maxDepth+1)+1).toInt)(0)
+    val leafCandidates=new mutable.PriorityQueue[(Int, Double)]()(
+      Ordering.by((_: (Int, Double))._2).reverse
+    )
+    var cntLeaves = 0
+    var cntNodes = 0
+    val nodeIterator = topNode.subtreeIterator
+    while(nodeIterator.hasNext){
+      cntNodes+=1
+      val curNode = nodeIterator.next()
+      id2Node(curNode.id)=curNode
+      if(!curNode.isLeaf){
+//        println(s"${curNode.id}, ${curNode.stats.get.gain}")
+        if(curNode.leftNode.get.isLeaf && curNode.rightNode.get.isLeaf){
+          leafCandidates.enqueue((curNode.id, curNode.stats.get.gain))
+        }
+      }
+      else
+        cntLeaves+=1
+    }
+
+
+    println(s"cnt leaves: $cntLeaves, curLeaves: $curLeaves, numLeaves: $numLeaves, cntNodes: $cntNodes")
+
+    while(cntLeaves>numLeaves){
+      val newLeafId = leafCandidates.dequeue()._1
+      val newLeafNode = id2Node(newLeafId)
+//      println(s"${newLeafNode.id}, ${newLeafNode.stats.get.gain}")
+      newLeafNode.isLeaf=true
+      cntLeaves-=1
+      mergedNodes(newLeafNode.leftNode.get.id)=1
+      mergedNodes(newLeafNode.rightNode.get.id)=1
+      val parentId = Node.parentIndex(newLeafId)
+      if(id2Node(Node.leftChildIndex(parentId)).isLeaf && id2Node(Node.rightChildIndex(parentId)).isLeaf){
+        leafCandidates.enqueue((parentId, id2Node(parentId).stats.get.gain))
+      }
+    }
+
+    mergedNodes.toArray
   }
 }
 
@@ -224,8 +292,8 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
         node.split = Some(split)
         val childIsLeaf = (Node.indexToLevel(nodeId) + 1) == maxDepth
         //
-        val leftChildIsLeaf = childIsLeaf || (stats.leftImpurity == 0.0)
-        val rightChildIsLeaf = childIsLeaf || (stats.rightImpurity == 0.0)
+        val leftChildIsLeaf = childIsLeaf || (stats.leftImpurity <= 0.01)
+        val rightChildIsLeaf = childIsLeaf || (stats.rightImpurity <= 0.01)
         node.leftNode = Some(Node(Node.leftChildIndex(nodeId),
           stats.leftPredict, stats.leftImpurity, leftChildIsLeaf))
         nodeId2Score(node.leftNode.get.id) = node.leftNode.get.predict.predict
@@ -310,14 +378,6 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       * val sumWeights = hist.scoreWeights **/
 
     val feature = splits(0).feature
-   /****
-     * if(663 == feature || 2254 == feature){
-     * println("###################################")
-     * println(s"feature: $feature")
-     * println("counts: " + counts.mkString(","))
-     * println("sumTargets: " + sumTargets.mkString(","))
-     * println("sumWeights: " + sumWeights.mkString(","))
-     * } ***/
 
     val cumHist = hist.cumulate(nodeInfo)
 

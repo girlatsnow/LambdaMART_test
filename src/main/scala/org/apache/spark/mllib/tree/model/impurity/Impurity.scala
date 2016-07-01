@@ -18,12 +18,13 @@
 package org.apache.spark.mllib.tree.model.impurity
 
 import org.apache.spark.annotation.{DeveloperApi, Experimental}
+import org.apache.spark.mllib.tree.config.Strategy
 
 /**
- * :: Experimental ::
+  * :: Experimental ::
  * Trait for calculating information gain.
  * This trait is used for
- *  (a) setting the impurity parameter in [[org.apache.spark.mllib.tree.configuration.Strategy]]
+ *  (a) setting the impurity parameter in [[Strategy]]
  *  (b) calculating impurity values from sufficient statistics.
  */
 @Experimental
@@ -32,6 +33,7 @@ trait Impurity extends Serializable {
   /**
    * :: DeveloperApi ::
    * information calculation for multiclass classification
+ *
    * @param counts Array[Double] with counts for each label
    * @param totalCount sum of counts for all labels
    * @return information value, or 0 if totalCount = 0
@@ -42,6 +44,7 @@ trait Impurity extends Serializable {
   /**
    * :: DeveloperApi ::
    * information calculation for regression
+ *
    * @param count number of instances
    * @param sum sum of labels
    * @param sumSquares summation of squares of the labels
@@ -55,12 +58,14 @@ trait Impurity extends Serializable {
  * Interface for updating views of a vector of sufficient statistics,
  * in order to compute impurity from a sample.
  * Note: Instances of this class do not hold the data; they operate on views of the data.
+ *
  * @param statsSize  Length of the vector of sufficient statistics for one bin.
  */
 private[tree] abstract class ImpurityAggregator(val statsSize: Int) extends Serializable {
 
   /**
    * Merge the stats from one bin into another.
+ *
    * @param allStats  Flat stats array, with stats for this (node, feature, bin) contiguous.
    * @param offset    Start index of stats for (node, feature, bin) which is modified by the merge.
    * @param otherOffset  Start index of stats for (node, feature, other bin) which is not modified.
@@ -75,6 +80,7 @@ private[tree] abstract class ImpurityAggregator(val statsSize: Int) extends Seri
 
   /**
    * Update stats for one (node, feature, bin) with the given label.
+ *
    * @param allStats  Flat stats array, with stats for this (node, feature, bin) contiguous.
    * @param offset    Start index of stats for this (node, feature, bin).
    */
@@ -82,6 +88,7 @@ private[tree] abstract class ImpurityAggregator(val statsSize: Int) extends Seri
 
   /**
    * Get an [[ImpurityCalculator]] for a (node, feature, bin).
+ *
    * @param allStats  Flat stats array, with stats for this (node, feature, bin) contiguous.
    * @param offset    Start index of stats for this (node, feature, bin).
    */
@@ -93,6 +100,7 @@ private[tree] abstract class ImpurityAggregator(val statsSize: Int) extends Seri
  * Stores statistics for one (node, feature, bin) for calculating impurity.
  * Unlike [[ImpurityAggregator]], this class stores its own data and is for a specific
  * (node, feature, bin).
+ *
  * @param stats  Array of sufficient statistics for a (node, feature, bin).
  */
 private[tree] abstract class ImpurityCalculator(val stats: Array[Double]) {

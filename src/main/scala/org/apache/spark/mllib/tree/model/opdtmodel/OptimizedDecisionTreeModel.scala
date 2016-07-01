@@ -22,8 +22,9 @@ import java.io.{File, FileOutputStream, PrintWriter}
 import org.apache.spark.annotation.Experimental
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.mllib.linalg.Vector
-import org.apache.spark.mllib.tree.configuration.Algo._
-import org.apache.spark.mllib.tree.configuration.{Algo, FeatureType}
+import org.apache.spark.mllib.tree.config.Algo
+import org.apache.spark.mllib.tree.config.Algo._
+import org.apache.spark.mllib.tree.configuration.FeatureType
 import org.apache.spark.mllib.tree.model.Split
 import org.apache.spark.mllib.tree.model.informationgainstats.InformationGainStats
 import org.apache.spark.mllib.tree.model.node.Node
