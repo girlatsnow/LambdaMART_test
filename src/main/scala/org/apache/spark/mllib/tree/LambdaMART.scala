@@ -29,8 +29,12 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
     algo match {
       case LambdaMart =>
         LambdaMART.boostMart(trainingDataSet, validateDataSet, trainingData_T,gainTable,
-          boostingStrategy,params, feature2Gain)
+          boostingStrategy, params, feature2Gain)
       case Regression =>
+        LambdaMART.boostRegression(trainingDataSet, validateDataSet, trainingData_T,gainTable,
+          boostingStrategy,params, feature2Gain)
+      case Classification =>
+
         LambdaMART.boostRegression(trainingDataSet, validateDataSet, trainingData_T,gainTable,
           boostingStrategy,params, feature2Gain)
       case _ =>
@@ -184,7 +188,7 @@ object LambdaMART extends Logging {
 
         logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
 
-        val featureUseCount = new Array[Int](trainingData.count().toInt)
+        val featureUseCount = new Array[Int](feature2Gain.length)
         var TrainingDataUse = trainingData
         if(params.ffraction < 1.0)
         {
@@ -195,7 +199,7 @@ object LambdaMART extends Logging {
           params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
         val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
           params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
-          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves)
+          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves, sfraction=params.sfraction)
         lambdasBc.unpersist(blocking=false)
         weightsBc.unpersist(blocking=false)
         timer.stop(s"building tree $m")
@@ -351,7 +355,6 @@ object LambdaMART extends Logging {
     treeStrategy.assertValid()
     val loss = boostingStrategy.loss
 
-
     val trainingData = trainingDataSet.getData()
     val label = trainingDataSet.getLabel()
     val initScores = trainingDataSet.getScore()
@@ -370,7 +373,7 @@ object LambdaMART extends Logging {
 
     val currentScores = initScores
     var initErrors = 0.0
-    Range(0,numSamples).par.foreach{ni => initErrors+=loss.computeError(currentScores(ni),label(ni))}
+    Range(0,numSamples).foreach{ni => initErrors+=loss.computeError(currentScores(ni),label(ni))}
     initErrors/=numSamples
     println(s"NDCG initError sum = $initErrors")
 
@@ -441,7 +444,7 @@ object LambdaMART extends Logging {
         timer.stop(s"building tree $m")
 
         baseLearners(m) = model
-        baseLearnerWeights(m) = learningRates(m)
+        baseLearnerWeights(m) = learningRates(phase)
 
         Range(0, numSamples).par.foreach(si =>
           currentScores(si) += baseLearnerWeights(m) * treeScores(si)
@@ -510,7 +513,7 @@ object LambdaMART extends Logging {
           println(s"currentScores: ${currentValidateScore.mkString(",")}")
 
           var errors = 0.0
-          Range(0, numValidate).par.foreach{ni => val x= loss.computeError(currentScores(ni), validateLabel(ni))
+          Range(0, numValidate).foreach{ni => val x= loss.computeError(currentScores(ni), validateLabel(ni))
           errors+=x
           }
 
@@ -525,9 +528,10 @@ object LambdaMART extends Logging {
         }
 
         var errors = 0.0
-        Range(0, numSamples).par.foreach{ni => val x= loss.computeError(currentScores(ni), label(ni))
+        Range(0, numSamples).foreach{ni => val x= loss.computeError(currentScores(ni), label(ni))
         errors += x
         }
+        errors/=numSamples
 
         val pw = new PrintWriter(new FileOutputStream(new File("ndcg.txt"), true))
         pw.write(errors.toString + "\n")

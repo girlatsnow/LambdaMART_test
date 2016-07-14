@@ -108,10 +108,13 @@ object BoostingStrategy {
     algo match {
       case Classification =>
         treeStrategy.numClasses = 2
+        println("Classification")
         new BoostingStrategy(treeStrategy, LogLoss)
       case Regression =>
+        println("Regression")
         new BoostingStrategy(treeStrategy, SquaredError)
       case LambdaMart =>
+        println("LambdaMart")
         new BoostingStrategy(treeStrategy, SquaredError)
       case _ =>
         throw new IllegalArgumentException(s"$algo is not supported by boosting.")

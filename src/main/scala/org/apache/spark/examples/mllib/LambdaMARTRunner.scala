@@ -50,6 +50,7 @@ object LambdaMARTRunner {
                var sampleQueryPercent: Double = 1.0,
                var numPartitions: Int = 0,
                var ffraction: Double = 1.0,
+               var sfraction: Double = 1.0,
                var secondaryMS: Double = 0.0,
                var secondaryLE: Boolean = false,
                var sigma: Double = 1.0,
@@ -87,7 +88,7 @@ object LambdaMARTRunner {
         s"queryBoundyValidate = $queryBoundyValidate\ninitScoreValidate = $initScoreValidate\nlabelValidate = $labelValidate\n" +
         s"expandTreeEnsemble = $expandTreeEnsemble\nfeatureIniFile = $featureIniFile\ngainTableStr = $gainTableStr\n" +
         s"algo = $algo\nmaxDepth = $maxDepth\nnumLeaves = $numLeaves\nnumPruningLeaves = $numPruningLeaves\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
-        s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsecondaryMS = $secondaryMS\n" +
+        s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsfraction = $sfraction\nsecondaryMS = $secondaryMS\n" +
         s"secondaryLE = $secondaryLE\nsigma = $sigma\ndistanceWeight2 = $distanceWeight2\nbaselineAlphaFilename = $baselineAlphaFilename\nentropyCoefft = $entropyCoefft\n" +
         s"featureFirstUsePenalty = $featureFirstUsePenalty\nfeatureReusePenalty = $featureReusePenalty\nlearningStrategy = $learningStrategy\noutputNdcgFilename = $outputNdcgFilename\n" +
         s"active_lambda_learningStrategy = $active_lambda_learningStrategy\nrho_lambda = $rho_lambda\nactive_leaves_value_learningStrategy = $active_leaves_value_learningStrategy\n" +
@@ -190,13 +191,16 @@ object LambdaMARTRunner {
       } text (s"number of partitions, default: ${defaultParams.numPartitions}")
       opt[Double]("sampleFeaturePercent") optional() foreach { x =>
         defaultParams.sampleFeaturePercent = x
-      } text (s"feature percentage used for training")
+      } text (s"global feature percentage used for training")
       opt[Double]("sampleQueryPercent") optional() foreach { x =>
         defaultParams.sampleQueryPercent = x
-      } text (s"query percentage used for training")
+      } text (s"global query percentage used for training")
       opt[Double]("ffraction") optional() foreach { x =>
         defaultParams.ffraction = x
-      } text (s"feature percentage used for training")
+      } text (s"feature percentage used for training for each tree")
+      opt[Double]("sfraction") optional() foreach { x =>
+        defaultParams.sfraction = x
+      } text (s"sample percentage used for training for each tree")
       opt[Double]("secondaryMS") optional() foreach { x =>
         defaultParams.secondaryMS = x
       } text (s"secondaryMetricShare")
@@ -296,8 +300,8 @@ object LambdaMARTRunner {
         loaded
       }
       var queryBoundy = if (params.queryBoundy!=null) dataSetLoader.loadQueryBoundy(sc, params.queryBoundy) else null
-      require(queryBoundy.last == numSamples || queryBoundy==null, s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
-      val numQuery = queryBoundy.length - 1
+      require(queryBoundy==null || queryBoundy.last == numSamples , s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
+      val numQuery = if(queryBoundy!=null) queryBoundy.length - 1 else 0
       println(s"num of data query: $numQuery")
 
       val numSampleQuery = if (params.sampleQueryPercent < 1) (numQuery * params.sampleQueryPercent).toInt else numQuery
@@ -321,9 +325,14 @@ object LambdaMARTRunner {
       }
       val numFeats = trainingData.count().toInt
       println(s"numFeats: $numFeats")
+      val trainingData_T = genTransposedData(trainingData, numFeats, label.length)
 
       trainingData = dataSetLoader.getSampleFeatureData(sc, trainingData, params.sampleFeaturePercent)
-      val trainingData_T = genTransposedData(trainingData, numFeats, label.length)
+
+      if(params.algo=="Classification"){
+        label=label.map(x=>(x*2-1).toShort)
+      }
+
       val trainingDataSet = new dataSet(label, initScores, queryBoundy, trainingData)
 
       var validtionDataSet: dataSet = null
@@ -351,30 +360,40 @@ object LambdaMARTRunner {
 
       //extract secondGain and secondInverseMaxDcg
       if (params.secondGainsFileName != null && params.secondaryInverseMaxDcgFileName != null) {
-        params.secondGains = sc.textFile(params.secondGainsFileName).first().split(",").map(_.toDouble)
-        params.secondaryInverseMaxDcg = sc.textFile(params.secondaryInverseMaxDcgFileName).first().split(",").map(_.toDouble)
+        val spTf_1 = sc.textFile(params.secondGainsFileName)
+        if (spTf_1.count() > 0)
+          params.secondGains = spTf_1.first().split(",").map(_.toDouble)
+        val spTf_2 = sc.textFile(params.secondaryInverseMaxDcgFileName)
+        if (spTf_2.count() > 0)
+          params.secondaryInverseMaxDcg = spTf_2.first().split(",").map(_.toDouble)
       }
 
       if (params.discountsFilename != null) {
-        params.discounts = sc.textFile(params.discountsFilename).first().split(",").map(_.toDouble)
+        val spTf = sc.textFile(params.discountsFilename)
+        if (spTf.count() > 0)
+          params.discounts = spTf.first().split(",").map(_.toDouble)
       }
 
       if (params.sampleWeightsFilename != null) {
-        params.sampleWeights = sc.textFile(params.sampleWeightsFilename).first().split(",").map(_.toDouble)
+        val spTf = sc.textFile(params.sampleWeightsFilename)
+        if (spTf.count() >0)
+          params.sampleWeights = spTf.first().split(",").map(_.toDouble)
       }
 
-      if (params.baselineDcgsFilename != null) {
-        val tmp = sc.textFile(params.baselineDcgsFilename).first().split(",").map(_.toDouble)
-        params.baselineDcgs = if (tmp.isEmpty) null else tmp
+      if (params.baselineDcgsFilename!=null) {
+        val spTf = sc.textFile(params.baselineDcgsFilename)
+        if (spTf.count() > 0)
+          params.baselineDcgs = spTf.first().split(",").map(_.toDouble)
       }
 
       if (params.baselineAlphaFilename != null) {
-        val temp = sc.textFile(params.baselineAlphaFilename).first().split(",").map(_.toDouble)
-        params.baselineAlpha = if (temp.isEmpty) null else temp
+        val spTf = sc.textFile(params.baselineAlphaFilename)
+        if (spTf.count() > 0)
+          params.baselineAlpha = spTf.first().split(",").map(_.toDouble)
       }
 
-      val feature2Gain = new Array[Double](trainingDataSet.getData().count().toInt)
-      if (params.algo == "LambdaMart") {
+      val feature2Gain = new Array[Double](numFeats)
+      if (params.algo == "LambdaMart" || params.algo=="Classification") {
         val startTime = System.nanoTime()
         val model = LambdaMART.train(trainingDataSet, validtionDataSet, trainingData_T, gainTable,
           boostingStrategy, params, feature2Gain)
@@ -386,7 +405,7 @@ object LambdaMARTRunner {
           val testNDCG = testModel(sc, model, params, gainTable)
           for (i <- 0 until testNDCG.length) {
             val it = i * params.testSpan
-            println(s"testNDCG error $it: " + testNDCG(i))
+            println(s"testNDCG error $it = " + testNDCG(i))
           }
         }
 
@@ -489,8 +508,12 @@ object LambdaMARTRunner {
   }
 
   def loadTestData(sc: SparkContext, path: String): RDD[Vector] = {
-        sc.textFile(path).map{line => Vectors.dense(line.split(",").map(_.toDouble))}
-//    sc.textFile(path).map { line => Vectors.dense(line.split("#")(1).split(",").map(_.toDouble)) }
+        sc.textFile(path).map{line =>
+          if(line.contains("#"))
+            Vectors.dense(line.split("#")(1).split(",").map(_.toDouble))
+          else
+            Vectors.dense(line.split(",").map(_.toDouble))}
+
 
     //    val testData = sc.textFile(path).map {line => line.split("#")(1).split(",").map(_.toDouble)}
     //    val testTrans = testData.zipWithIndex.flatMap {
@@ -581,7 +604,7 @@ object LambdaMARTRunner {
       }
 
       scores.zipWithIndex.collect {
-        case (score, it) if it % rate == 0 => score
+        case (score, it) if it ==0 || (it+1)% rate == 0 => score
       }
     }.collect().transpose
 

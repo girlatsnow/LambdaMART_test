@@ -163,17 +163,28 @@ object dataSetLoader{
   }
 
   def getSampleFeatureData(sc: SparkContext, trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])], sampleFeatPct: Double) = {
-    if (sampleFeatPct < 1.0) {
-      var rdd = trainingData.sample(false, sampleFeatPct)
-      rdd = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
-        case Some(np) => rdd.sortBy(x => x._1, numPartitions = np)
-        case None => rdd
-      }
-      val numFeats_S = rdd.count()
+//    def IsSeleted(ffraction: Double): Boolean = {
+//      val randomNum = scala.util.Random.nextDouble()
+//      var active = false
+//      if(randomNum < ffraction)
+//      {
+//        active = true
+//      }
+//      active
+//    }
+    val rdd = if (sampleFeatPct < 1.0) {
+      var sampleData = trainingData.sample(false, sampleFeatPct)
+//      sampleData = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
+//        case Some(np) => sampleData.sortBy(x => x._1, numPartitions = np)
+//        case None => sampleData
+//      }
+//      val sampleData = trainingData.filter(item =>IsSeleted(sampleFeatPct))
+      val numFeats_S = sampleData.count()
       println(s"numFeats_sampling: $numFeats_S")
-      println(s"numPartitions_sampling: ${rdd.partitions.length}")
+      println(s"numPartitions_sampling: ${sampleData.partitions.length}")
       trainingData.unpersist(blocking = false)
-      rdd
+      sampleData
     } else trainingData
+    rdd.persist(StorageLevel.MEMORY_AND_DISK).setName("sampleTrainingData")
   }
 }
