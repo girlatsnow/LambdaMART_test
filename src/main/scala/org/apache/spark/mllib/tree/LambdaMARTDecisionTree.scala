@@ -596,12 +596,12 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
   def getImpurity(count: Double, target: Double, squareTarget: Double): Double ={
     if(count==0) 0
     else
-      (squareTarget-target*target/count)/count
+      (squareTarget-target*target*1.0/count)/count
   }
 
   def getPredict(count: Double, target: Double):Double={
     if(count==0) 0
-    else target/count
+    else target*1.0/count
   }
 
   def CalculateSplittedLeafOutput(totalCount: Int, sumTargets: Double, sumWeights: Double): Double = {

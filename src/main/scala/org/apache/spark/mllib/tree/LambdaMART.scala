@@ -17,6 +17,8 @@ import org.apache.spark.mllib.tree.model.opdtmodel.OptimizedDecisionTreeModel
 import org.apache.spark.mllib.util.TreeUtils
 import org.apache.spark.rdd.RDD
 
+import scala.util.Random
+
 class LambdaMART(val boostingStrategy: BoostingStrategy,
   val params: Params) extends Serializable with Logging {
   def run(trainingDataSet: dataSet,
@@ -145,9 +147,30 @@ object LambdaMART extends Logging {
 
       val dcPhaseBc = sc.broadcast(dcPhase)
 
+      val qfraction = 0.5 // stochastic sampling fraction of query per tree
       while (m < numIterations && !earlystop) {
         timer.start(s"building tree $m")
         println("\nGradient boosting tree iteration " + m)
+
+        val activeSamples = if(qfraction>=1.0) new Array[Byte](numSamples)(1)
+        else{
+          val act = new Array[Byte](numSamples)
+          val querySampler = Seq.fill(numQueries)(Random.nextDouble)
+          Range(0,numQueries).par.foreach{qi=>
+            if(querySampler(qi)<=qfraction){
+              for(is <- queryBoundy(qi) until queryBoundy(qi+1)){
+                act(is)=1.toByte
+              }
+            }
+            else{
+              for(is <- queryBoundy(qi) until queryBoundy(qi+1)){
+                act(is)=0.toByte
+              }
+            }
+          }
+          act
+        }
+//        println(s"active samples: ${activeSamples.sum}")
 
         val iterationBc = sc.broadcast(m)
         val currentScoresBc = sc.broadcast(currentScores)
@@ -359,7 +382,8 @@ object LambdaMART extends Logging {
     val label = trainingDataSet.getLabel()
     val initScores = trainingDataSet.getScore()
 
-
+    println(s"label: ${label.take(20).mkString(" ")}")
+    println(s"initScore: ${initScores.take(20).mkString(" ")}")
     val sc = trainingData.sparkContext
     val numSamples = label.length
 
@@ -394,7 +418,10 @@ object LambdaMART extends Logging {
         println("\nGradient boosting tree iteration " + m)
         //update lambda
         Range(0, numSamples).par.foreach { ni =>
-          lambdas(ni)= -2*(label(ni)-initScores(ni))}
+          lambdas(ni)= -loss.gradient(currentScores(ni),label(ni))}
+
+        println(s"lambdasAtIteration$m: "+lambdas.take(10).mkString(" "))
+        println(s"lambdaSumAtIteration$m: ${lambdas.sum}")
 
         /*****
           * //adaptive lambda
@@ -458,6 +485,7 @@ object LambdaMART extends Logging {
           pwCS.write(currentScores.mkString(",") + "\n")
           pwCS.close()
         }
+        println(s"currentScoresAt$m: ${currentScores.take(20).mkString(" ")}")
 
         /**
           * //adaptive leaves value
