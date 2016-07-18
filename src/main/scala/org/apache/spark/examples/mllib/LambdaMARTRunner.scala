@@ -403,7 +403,8 @@ object LambdaMARTRunner {
         // test
         if (params.testSpan != 0) {
           val testNDCG = testModel(sc, model, params, gainTable)
-          for (i <- 0 until testNDCG.length) {
+          println(s"testNDCG error 1 = " + testNDCG(0))
+          for (i <- 1 until testNDCG.length) {
             val it = i * params.testSpan
             println(s"testNDCG error $it = " + testNDCG(i))
           }
@@ -606,7 +607,15 @@ object LambdaMARTRunner {
       scores.zipWithIndex.collect {
         case (score, it) if it ==0 || (it+1)% rate == 0 => score
       }
-    }.collect().transpose
+    }
+    val predictionsByIter =predictions.zipWithIndex.flatMap {
+      case (row, rowIndex) => row.zipWithIndex.map {
+        case (number, columnIndex) => columnIndex -> (rowIndex, number)
+      }
+    }.groupByKey.sortByKey().values
+      .map {
+        indexedRow => indexedRow.toArray.sortBy(_._1).map(_._2)
+      }
 
     val learningRates = params.learningRate
     val distanceWeight2 = params.distanceWeight2
@@ -622,22 +631,12 @@ object LambdaMARTRunner {
       learningRates(0), distanceWeight2, baselineAlpha,
       secondMs, secondLe, secondGains, secondaryInverseMacDcg, discounts, baselineDcgs)
     val numQueries = testQueryBound.length - 1
-    val (qiMinPP, lcNumQueriesPP) = TreeUtils.getPartitionOffsets(numQueries, sc.defaultParallelism)
-    val pdcRDD = sc.parallelize(qiMinPP.zip(lcNumQueriesPP)).cache().setName("testPDCCtrl")
-
     val dcBc = sc.broadcast(dc)
-    predictions.map { scores =>
-      val currentScoresBc = sc.broadcast(scores)
-      val sumErrors = pdcRDD.mapPartitions { iter =>
-        val dc = dcBc.value
-        val currentScores = currentScoresBc.value
-        iter.map { case (qiMin, lcNumQueries) =>
-          dc.getPartErrors(currentScores, qiMin, qiMin + lcNumQueries)
-        }
-      }.sum()
-      currentScoresBc.destroy(blocking = false)
-      sumErrors / numQueries
-    }
+
+    predictionsByIter.map { scores =>
+      val dc = dcBc.value
+      dc.getPartErrors(scores, 0, numQueries)/ numQueries
+    }.collect()
 
   }
 

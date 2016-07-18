@@ -3,6 +3,7 @@ package org.apache.spark.mllib.tree
 //import akka.io.Udp.SO.Broadcast
 import java.io.{File, FileOutputStream, PrintWriter}
 
+import breeze.linalg.min
 import org.apache.hadoop.fs.Path
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
@@ -137,6 +138,8 @@ object LambdaMART extends Logging {
     val oldRep = new Array[Double](numSamples)
     val validationSpan = params.validationSpan
     val multiplier_Score = 1.0
+    var sampleFraction = params.sfraction
+
     while(phase < numPhases && !earlystop){
       numIterations += params.numIterations(phase)
       //initial derivativeCalculator for every phase
@@ -147,29 +150,12 @@ object LambdaMART extends Logging {
 
       val dcPhaseBc = sc.broadcast(dcPhase)
 
-      val qfraction = 0.5 // stochastic sampling fraction of query per tree
+      var qfraction = 0.5 // stochastic sampling fraction of query per tree
       while (m < numIterations && !earlystop) {
         timer.start(s"building tree $m")
         println("\nGradient boosting tree iteration " + m)
 
-        val activeSamples = if(qfraction>=1.0) new Array[Byte](numSamples)(1)
-        else{
-          val act = new Array[Byte](numSamples)
-          val querySampler = Seq.fill(numQueries)(Random.nextDouble)
-          Range(0,numQueries).par.foreach{qi=>
-            if(querySampler(qi)<=qfraction){
-              for(is <- queryBoundy(qi) until queryBoundy(qi+1)){
-                act(is)=1.toByte
-              }
-            }
-            else{
-              for(is <- queryBoundy(qi) until queryBoundy(qi+1)){
-                act(is)=0.toByte
-              }
-            }
-          }
-          act
-        }
+
 //        println(s"active samples: ${activeSamples.sum}")
 
         val iterationBc = sc.broadcast(m)
@@ -177,8 +163,6 @@ object LambdaMART extends Logging {
         updateDerivatives(pdcRDD, dcPhaseBc, currentScoresBc, iterationBc, lambdas, weights)
         currentScoresBc.unpersist(blocking=false)
         iterationBc.unpersist(blocking=false)
-
-
         /*****
           * //adaptive lambda
           * if(params.active_lambda_learningStrategy) {
@@ -209,6 +193,51 @@ object LambdaMART extends Logging {
         val lambdasBc = sc.broadcast(lambdas)
         val weightsBc = sc.broadcast(weights)
 
+
+        sampleFraction = min(params.sfraction+ (1-params.sfraction)/10*(m*11.0/numIterations).toInt, 1.0)
+        println(s"sampleFraction: $sampleFraction")
+        qfraction=sampleFraction
+        val initTimer = new TimeTracker()
+        initTimer.start("topInfo")
+        val (activeSamples, sumCount, sumTarget, sumSquare, sumWeight): (Array[Byte], Int, Double, Double, Double )= {
+          if (qfraction >= 1.0) {
+            (Array.fill[Byte](numSamples)(1), numSamples, lambdas.sum, lambdas.map(x => x * x).sum, weights.sum)
+          }
+          else {
+            val act = new Array[Byte](numSamples)
+            //            var sumC = 0
+            //            var sumT = 0.0
+            //            var sumS = 0.0
+            //            var sumW = 0.0
+            //            val squares= lambdas.map(x=>x*x)
+            //            Range(0, numQueries).foreach { qi =>
+            //              if (Random.nextDouble() <= sampleFraction) {
+            //                Range(queryBoundy(qi),queryBoundy(qi + 1)).foreach { is=>
+            //                  act(is) = 1.toByte
+            //                  sumT+=lambdas(is)
+            //                  sumS+=squares(is)
+            //                  sumW+=weights(is)
+            //                }
+            //                sumC += queryBoundy(qi + 1) - queryBoundy(qi)
+            //                sampleQuery+=1
+            //              }
+            //              else {
+            //                Range(queryBoundy(qi),queryBoundy(qi + 1)).par.foreach { is=>
+            //                  act(is) = 0.toByte
+            //                }
+            //              }
+            //            }
+            //            (act, sumC, sumT, sumS, sumW)
+            //          }
+            val (sumC, sumT, sumS, sumW):(Int, Double, Double, Double) = updateActSamples(pdcRDD, dcPhaseBc, lambdasBc, weightsBc, qfraction, act)
+            (act, sumC, sumT, sumS, sumW)
+          }
+        }
+          println(s"sampleCount: $sumCount")
+        initTimer.stop("topInfo")
+        println(s"$initTimer")
+
+
         logDebug(s"Iteration $m: scores: \n"+currentScores.mkString(" "))
 
         val featureUseCount = new Array[Int](feature2Gain.length)
@@ -222,7 +251,8 @@ object LambdaMART extends Logging {
           params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
         val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
           params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
-          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves, sfraction=params.sfraction)
+          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves,
+          (sumCount, sumTarget, sumSquare, sumWeight), actSamples = activeSamples)
         lambdasBc.unpersist(blocking=false)
         weightsBc.unpersist(blocking=false)
         timer.stop(s"building tree $m")
@@ -461,11 +491,12 @@ object LambdaMART extends Logging {
           TrainingDataUse = trainingData.filter(item =>IsSeleted(params.ffraction))
         }
 
+        val topValue = (numSamples, lambdas.sum, lambdas.map(x=>x*x).sum, 0.0)
         val tree = new LambdaMARTDecisionTree(treeStrategy, params.minInstancesPerNode(phase),
           params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
         val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
           params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
-          params.featureReusePenalty, feature2Gain, params.sampleWeights, params.numPruningLeaves)
+          params.featureReusePenalty, feature2Gain, params.sampleWeights, params.numPruningLeaves, topValue)
         lambdasBc.unpersist(blocking=false)
 
         timer.stop(s"building tree $m")
@@ -610,6 +641,58 @@ object LambdaMART extends Logging {
       Array.copy(lcWeights, 0, weights, siMin, lcWeights.length)
     }
   }
+  def updateActSamples(pdcRDD: RDD[(Int, Int)], dcBc: Broadcast[DerivativeCalculator],
+                         lambdasBc: Broadcast[Array[Double]],
+                         weightsBc: Broadcast[Array[Double]],
+                         fraction: Double,
+                         act: Array[Byte]): (Int, Double, Double, Double) = {
+      val partAct = pdcRDD.mapPartitions { iter =>
+        val lambdas = lambdasBc.value
+        val weights = weightsBc.value
+        val queryBoundy = dcBc.value.queryBoundy
+        val frac = fraction
+        iter.map { case (qiMin, lcNumQueries) =>
+          val qiEnd = qiMin + lcNumQueries
+          val siTotalMin = queryBoundy(qiMin)
+          val numTotalDocs = queryBoundy(qiEnd) - siTotalMin
+          val lcActSamples = new Array[Byte](numTotalDocs)
+          var lcSumCount = 0
+          var lcSumTarget = 0.0
+          var lcSumSquare = 0.0
+          var lcSumWeight = 0.0
+          var qi = qiMin
+          while (qi < qiEnd) {
+            val lcMin = queryBoundy(qi) - siTotalMin
+            val siMin = queryBoundy(qi)
+            val siEnd = queryBoundy(qi + 1)
+            val numDocsPerQuery = siEnd - siMin
+            if (Random.nextDouble() <= frac) {
+              Range(lcMin, lcMin + numDocsPerQuery).foreach { lsi =>
+                lcActSamples(lsi) = 1.toByte
+                lcSumTarget += lambdas(siTotalMin + lsi)
+                lcSumSquare += lambdas(siTotalMin + lsi) * lambdas(siTotalMin + lsi)
+                lcSumWeight += weights(siTotalMin + lsi)
+              }
+              lcSumCount += numDocsPerQuery
+            }
+            else {
+              Range(lcMin, lcMin + numDocsPerQuery).foreach { lsi =>
+                lcActSamples(lsi) = 0.toByte
+              }
+            }
+            qi += 1
+          }
+          (siTotalMin, lcActSamples, lcSumCount, lcSumTarget, lcSumSquare, lcSumWeight)
+
+        }
+
+      }
+      val actSamples = partAct.map(x => (x._1, x._2)).collect()
+      actSamples.par.foreach { case (siMin, lcAct) =>
+        Array.copy(lcAct, 0, act, siMin, lcAct.length)
+      }
+      partAct.map(x => (x._3, x._4, x._5, x._6)).reduce((a, b) => (a._1 + b._1, a._2 + b._2, a._3 + b._3, a._4 + b._4))
+    }
 
   def evaluateErrors(pdcRDD: RDD[(Int, Int)],
     dcBc: Broadcast[DerivativeCalculator],
