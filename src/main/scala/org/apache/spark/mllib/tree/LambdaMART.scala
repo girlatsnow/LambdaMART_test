@@ -78,7 +78,6 @@ object LambdaMART extends Logging {
     var baseLearners = new Array[OptimizedDecisionTreeModel](numTrees)
     var baseLearnerWeights = new Array[Double](numTrees)
     // val loss = boostingStrategy.loss
-    val learningRate = params.learningRate
     val numPruningLeaves = params.numPruningLeaves
     
     // Prepare strategy for individual trees, which use regression with variance impurity.
@@ -205,30 +204,6 @@ object LambdaMART extends Logging {
           }
           else {
             val act = new Array[Byte](numSamples)
-            //            var sumC = 0
-            //            var sumT = 0.0
-            //            var sumS = 0.0
-            //            var sumW = 0.0
-            //            val squares= lambdas.map(x=>x*x)
-            //            Range(0, numQueries).foreach { qi =>
-            //              if (Random.nextDouble() <= sampleFraction) {
-            //                Range(queryBoundy(qi),queryBoundy(qi + 1)).foreach { is=>
-            //                  act(is) = 1.toByte
-            //                  sumT+=lambdas(is)
-            //                  sumS+=squares(is)
-            //                  sumW+=weights(is)
-            //                }
-            //                sumC += queryBoundy(qi + 1) - queryBoundy(qi)
-            //                sampleQuery+=1
-            //              }
-            //              else {
-            //                Range(queryBoundy(qi),queryBoundy(qi + 1)).par.foreach { is=>
-            //                  act(is) = 0.toByte
-            //                }
-            //              }
-            //            }
-            //            (act, sumC, sumT, sumS, sumW)
-            //          }
             val (sumC, sumT, sumS, sumW):(Int, Double, Double, Double) = updateActSamples(pdcRDD, dcPhaseBc, lambdasBc, weightsBc, qfraction, act)
             (act, sumC, sumT, sumS, sumW)
           }
@@ -247,11 +222,12 @@ object LambdaMART extends Logging {
           TrainingDataUse = trainingData.filter(item =>IsSeleted(params.ffraction))
         }
 
+        treeStrategy.maxDepth=params.maxDepth(phase)
         val tree = new LambdaMARTDecisionTree(treeStrategy, params.minInstancesPerNode(phase),
           params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
         val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
           params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
-          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves,
+          params.featureReusePenalty, feature2Gain, params.sampleWeights, numPruningLeaves(phase),
           (sumCount, sumTarget, sumSquare, sumWeight), actSamples = activeSamples)
         lambdasBc.unpersist(blocking=false)
         weightsBc.unpersist(blocking=false)
@@ -496,7 +472,7 @@ object LambdaMART extends Logging {
           params.numLeaves, params.maxSplits, params.expandTreeEnsemble)
         val (model, treeScores) = tree.run(TrainingDataUse, trainingData_T, lambdasBc, weightsBc, numSamples,
           params.entropyCoefft, featureUseCount, params.featureFirstUsePenalty,
-          params.featureReusePenalty, feature2Gain, params.sampleWeights, params.numPruningLeaves, topValue)
+          params.featureReusePenalty, feature2Gain, params.sampleWeights, params.numPruningLeaves(phase), topValue)
         lambdasBc.unpersist(blocking=false)
 
         timer.stop(s"building tree $m")

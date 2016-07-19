@@ -38,9 +38,9 @@ object LambdaMARTRunner {
                var gainTableStr: String = null,
                var algo: String = "LambdaMart",
                var learningStrategy: String = "sgd",
-               var maxDepth: Int = 8,
+               var maxDepth: Array[Int] = null,
                var numLeaves: Int = 0,
-               var numPruningLeaves: Int = 0,
+               var numPruningLeaves: Array[Int] = null,
                var numIterations: Array[Int] = null,
                var maxSplits: Int = 128,
                var learningRate: Array[Double] = null,
@@ -87,7 +87,7 @@ object LambdaMARTRunner {
         s"outputTreeEnsemble = $outputTreeEnsemble\nfeatureNoToFriendlyName = $featureNoToFriendlyName\nvalidationData = $validationData\n" +
         s"queryBoundyValidate = $queryBoundyValidate\ninitScoreValidate = $initScoreValidate\nlabelValidate = $labelValidate\n" +
         s"expandTreeEnsemble = $expandTreeEnsemble\nfeatureIniFile = $featureIniFile\ngainTableStr = $gainTableStr\n" +
-        s"algo = $algo\nmaxDepth = $maxDepth\nnumLeaves = $numLeaves\nnumPruningLeaves = $numPruningLeaves\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
+        s"algo = $algo\nmaxDepth = ${maxDepth.mkString(":")}\nnumLeaves = $numLeaves\nnumPruningLeaves = ${numPruningLeaves.mkString(":")}\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
         s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsfraction = $sfraction\nsecondaryMS = $secondaryMS\n" +
         s"secondaryLE = $secondaryLE\nsigma = $sigma\ndistanceWeight2 = $distanceWeight2\nbaselineAlphaFilename = $baselineAlphaFilename\nentropyCoefft = $entropyCoefft\n" +
         s"featureFirstUsePenalty = $featureFirstUsePenalty\nfeatureReusePenalty = $featureReusePenalty\nlearningStrategy = $learningStrategy\noutputNdcgFilename = $outputNdcgFilename\n" +
@@ -158,16 +158,15 @@ object LambdaMARTRunner {
       opt[String]("algo") optional() foreach { x =>
         defaultParams.algo = x
       } text (s"algorithm (${Algo.values.mkString(",")}), default: ${defaultParams.algo}")
-      opt[Int]("maxDepth") optional() foreach { x =>
-        defaultParams.maxDepth = x
-      } text (s"max depth of the tree, default: ${defaultParams.maxDepth}") validate { x =>
-        if (x <= 30) success else failure("value <maxDepth> incorrect; should be less than or equals to 30.")
-      }
+      opt[String]("maxDepth") optional() foreach { x =>
+        defaultParams.maxDepth = x.split(":").map(_.toInt)
+      } text (s"max depth of the tree, default: ${defaultParams.maxDepth}")
+
       opt[Int]("numLeaves") optional() foreach { x =>
         defaultParams.numLeaves = x
       } text (s"num of leaves per tree, default: ${defaultParams.numLeaves}. Take precedence over --maxDepth.")
-      opt[Int]("numPruningLeaves") optional() foreach { x =>
-        defaultParams.numPruningLeaves = x
+      opt[String]("numPruningLeaves") optional() foreach { x =>
+        defaultParams.numPruningLeaves = x.split(":").map(_.toInt)
       } text (s"num of leaves per tree after pruning, default: ${defaultParams.numPruningLeaves}.")
       opt[String]("numIterations") optional() foreach { x =>
         defaultParams.numIterations = x.split(":").map(_.toInt)
@@ -277,9 +276,13 @@ object LambdaMARTRunner {
 
   def run(params: Params) {
     require(params.numIterations.length == params.learningRate.length &&
-      params.numIterations.length == params.minInstancesPerNode.length,
+      params.numIterations.length == params.minInstancesPerNode.length &&
+      params.numIterations.length == params.numPruningLeaves.length,
       s"numiterations: ${params.numIterations}, learningRate: ${params.learningRate}, " +
-        s"and minInstancesPerNode: ${params.minInstancesPerNode} do not match")
+        s"and minInstancesPerNode: ${params.minInstancesPerNode}, numPruningLeaves: ${params.numPruningLeaves}do not match")
+
+    require(!params.maxDepth.exists(dep => dep>30), s"value maxDepth:${params.maxDepth} incorrect; should be less than or equals to 30.")
+
 
     println(s"LambdaMARTRunner with parameters:\n${params.toString}")
     val conf = new SparkConf().setAppName(s"LambdaMARTRunner with $params")
@@ -356,7 +359,7 @@ object LambdaMARTRunner {
       val gainTable = params.gainTableStr.split(':').map(_.toDouble)
 
       val boostingStrategy = config.BoostingStrategy.defaultParams(params.algo)
-      boostingStrategy.treeStrategy.setMaxDepth(params.maxDepth)
+
 
       //extract secondGain and secondInverseMaxDcg
       if (params.secondGainsFileName != null && params.secondaryInverseMaxDcgFileName != null) {
@@ -403,7 +406,7 @@ object LambdaMARTRunner {
         // test
         if (params.testSpan != 0) {
           val testNDCG = testModel(sc, model, params, gainTable)
-          println(s"testNDCG error 1 = " + testNDCG(0))
+          println(s"testNDCG error 0 = " + testNDCG(0))
           for (i <- 1 until testNDCG.length) {
             val it = i * params.testSpan
             println(s"testNDCG error $it = " + testNDCG(i))

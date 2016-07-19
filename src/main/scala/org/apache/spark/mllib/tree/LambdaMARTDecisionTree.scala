@@ -70,28 +70,6 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     // TBD re-declared
     val nodeId2Score = new mutable.HashMap[Int, Double]()
 
-//    val lambdas = lambdasBc.value
-//    val weights = weightsBc.value
-//    var sumCount = 0
-//    var sumLambda = 0.0
-//    var sumSquareLambda= 0.0
-//    var sumWeight = 0.0
-//    Range(0, numSamples).foreach { si =>
-//      val rad = scala.util.Random.nextDouble()
-//      if(rad<=sfraction) {
-//        sumCount+=1
-//        sumLambda+=lambdas(si)
-//        sumSquareLambda+=lambdas(si)*lambdas(si)
-//        sumWeight+=weights(si)
-//        activeSamples(si)= 1.toByte
-//      }
-//      else
-//        activeSamples(si)=0.toByte
-//    }
-//
-//    println(s"sample count: $sumCount")
-//    val topInfo = new NodeInfoStats(sumCount, sumLambda, sumSquareLambda, sumWeight)
-
 //    val topInfo = new NodeInfoStats(numSamples, lambdasBc.value.sum, lambdasBc.value.map(x => x * x).sum, weightsBc.value.sum)
 
     val activeSamples:Array[Byte] = if(actSamples.isEmpty) Array.fill[Byte](numSamples)(1) else actSamples
@@ -135,8 +113,6 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
     while (nodeQueue.nonEmpty) {
       nodeQueue.dequeue()._1.isLeaf = true
     }
-
-
 
     println("print topNode")
     println(s"numDescendants: ${topNode.numDescendants}, curLeaves: $curLeaves")
@@ -299,7 +275,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
         }
         algo match {
           case LambdaMart=>
-            val layerSplit=true
+            val layerSplit=false
             if(layerSplit){
                binsToBestSplitLayer(histograms, splits, lcNodesInfo, entropyCoefft, featureUseCount,
                 featureFirstUsePenalty, featureReusePenalty, minInstancesPerNode = minDocPerNode)
