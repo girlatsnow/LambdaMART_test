@@ -1,6 +1,6 @@
 package org.apache.spark.examples.mllib
 
-import breeze.linalg.SparseVector
+import breeze.collection.mutable.SparseArray
 import org.apache.hadoop.fs.Path
 import org.apache.spark.mllib.dataSet.{dataSet, dataSetLoader}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
@@ -14,6 +14,7 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
 import scopt.OptionParser
 
+import scala.collection.mutable
 import scala.language.reflectiveCalls
 import scala.util.Random
 
@@ -322,12 +323,16 @@ object LambdaMARTRunner {
       }
       var trainingData = loadTrainingData(sc, params.trainingData, sc.defaultMinPartitions, sampleQueryId, queryBoundy, label.length)
 
+
       if (params.sampleQueryPercent < 1) {
         queryBoundy = dataSetLoader.getSampleQueryBound(sampleQueryId, queryBoundy)
         require(queryBoundy.last == label.length, s"QueryBoundy ${queryBoundy.last} does not match with data ${label.length} !")
       }
       val numFeats = trainingData.count().toInt
       println(s"numFeats: $numFeats")
+      val numNonZeros = trainingData.map{x => x._2.default}.filter(_!=0).count()
+      println(s"numFeats sparse on nonZero: $numNonZeros")
+
       val trainingData_T = genTransposedData(trainingData, numFeats, label.length)
 
       trainingData = dataSetLoader.getSampleFeatureData(sc, trainingData, params.sampleFeaturePercent)
@@ -451,7 +456,7 @@ object LambdaMARTRunner {
 
   def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int,
                        sampleQueryId: Array[Int], QueryBound: Array[Int], numSampling: Int)
-  : RDD[(Int, SparseVector[Short], Array[SplitInfo])] = {
+  : RDD[(Int, SparseArray[Short], Array[SplitInfo])] = {
     var rdd = sc.textFile(path, minPartitions).map { line =>
       val parts = line.split("#")
       val feat = parts(0).toInt
@@ -473,28 +478,53 @@ object LambdaMARTRunner {
         }
         sd
       }
-      // Sparse data
+//      // Sparse data
+//      is = 0
+//      var nnz = 0
+//      while (is < samplingData.length) {
+//        if (samplingData(is) != 0) {
+//          nnz += 1
+//        }
+//        is += 1
+//      }
+//      val idx = new Array[Int](nnz)
+//      val vas = new Array[Short](nnz)
+//      is = 0
+//      nnz = 0
+//      while (is < samplingData.length) {
+//        if (samplingData(is) != 0) {
+//          idx(nnz) = is
+//          vas(nnz) = samplingData(is)
+//          nnz += 1
+//        }
+//        is += 1
+//      }
+//      val sparseSamples = new SparseVector[Short](idx, vas, nnz, is)
+
+      val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
+      is = 0
+      while (is < samplingData.length) {
+        v2no(samplingData(is))+=1
+        is += 1
+      }
+      val (default, numDefault) = v2no.maxBy(x=>x._2)
+      val numAct = samplingData.length - numDefault
+      val idx = new Array[Int](numAct)
+      val vas = new Array[Short](numAct)
       is = 0
       var nnz = 0
       while (is < samplingData.length) {
-        if (samplingData(is) != 0) {
-          nnz += 1
-        }
-        is += 1
-      }
-      val idx = new Array[Int](nnz)
-      val vas = new Array[Short](nnz)
-      is = 0
-      nnz = 0
-      while (is < samplingData.length) {
-        if (samplingData(is) != 0) {
+        if (samplingData(is) != default) {
           idx(nnz) = is
           vas(nnz) = samplingData(is)
           nnz += 1
         }
         is += 1
       }
-      val sparseSamples = new SparseVector[Short](idx, vas, nnz, is)
+      val sparseSamples = new SparseArray[Short](idx, vas, nnz, is, default)
+
+//      val sparseSamples = new SparseVector[Short](sparseArr)
+
 
       val splits = if (parts.length > 2) {
         parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
@@ -532,7 +562,7 @@ object LambdaMARTRunner {
     //    testT.map(line => Vectors.dense(line))
   }
 
-  def genTransposedData(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  def genTransposedData(trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])],
                         numFeats: Int,
                         numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
     println("generating transposed data...")

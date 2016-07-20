@@ -39,11 +39,12 @@ class Histogram(val numBins: Int) {
     this
   }
 
-  def cumulate(info: NodeInfoStats)={
+  def cumulate(info: NodeInfoStats, defaultBin: Int)={
     // cumulate from right to left
     var bin = numBins-2
-    while (bin >0) {
-      val binRight = bin+1
+    var binRight = 0
+    while (bin > defaultBin) {
+      binRight = bin+1
       _counts(bin) += _counts(binRight)
       _scores(bin) += _scores(binRight)
       _squares(bin) += _squares(binRight)
@@ -51,7 +52,33 @@ class Histogram(val numBins: Int) {
       bin -= 1
     }
 
-    // fill in Entry(0) with node sum information
+    if(defaultBin!=0){
+      _counts(0)=info.sumCount-_counts(0)
+      _scores(0)=info.sumScores-_scores(0)
+      _squares(0)=info.sumSquares-_squares(0)
+      _scoreWeights(0)=info.sumScoreWeights-_scoreWeights(0)
+
+      bin = 1
+      var binLeft = 0
+      while(bin<defaultBin){
+        _counts(bin)=_counts(binLeft)-_counts(bin)
+        _scores(bin)=_scores(binLeft)-_scores(bin)
+        _squares(bin)=_squares(binLeft)-_squares(bin)
+        _scoreWeights(bin)=_scoreWeights(binLeft)-_scoreWeights(bin)
+        bin+=1
+        binLeft+=1
+      }
+      bin = defaultBin
+      binLeft = defaultBin-1
+      while(bin>0){
+        _counts(bin)=_counts(binLeft)
+        _scores(bin)=_scores(binLeft)
+        _squares(bin)=_squares(binLeft)
+        _scoreWeights(bin)=_scoreWeights(binLeft)
+        bin-=1
+        binLeft-=1
+      }
+    }
     _counts(0)=info.sumCount
     _scores(0)=info.sumScores
     _squares(0)=info.sumSquares

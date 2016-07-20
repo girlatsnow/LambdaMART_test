@@ -1,5 +1,6 @@
 package org.apache.spark.mllib.dataSet
 
+import breeze.collection.mutable.SparseArray
 import breeze.linalg.SparseVector
 import org.apache.spark.SparkContext
 import org.apache.spark.mllib.linalg.Vectors
@@ -13,9 +14,9 @@ import org.apache.spark.storage.StorageLevel
 class dataSet(label: Array[Short] = null,
               score: Array[Double] = null,
               queryBoundy: Array[Int] = null,
-              data: RDD[(Int, SparseVector[Short], Array[SplitInfo])] = null,
+              data: RDD[(Int, SparseArray[Short], Array[SplitInfo])] = null,
               dataTransposed: RDD[(Int, org.apache.spark.mllib.linalg.Vector)] = null) {
-  def getData(): RDD[(Int, SparseVector[Short], Array[SplitInfo])] = {
+  def getData(): RDD[(Int, SparseArray[Short], Array[SplitInfo])] = {
     data
   }
 
@@ -162,7 +163,7 @@ object dataSetLoader{
     res
   }
 
-  def getSampleFeatureData(sc: SparkContext, trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])], sampleFeatPct: Double) = {
+  def getSampleFeatureData(sc: SparkContext, trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])], sampleFeatPct: Double) = {
 //    def IsSeleted(ffraction: Double): Boolean = {
 //      val randomNum = scala.util.Random.nextDouble()
 //      var active = false

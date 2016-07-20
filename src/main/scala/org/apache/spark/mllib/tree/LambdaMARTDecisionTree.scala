@@ -1,6 +1,6 @@
 package org.apache.spark.mllib.tree
 
-import breeze.linalg.SparseVector
+import breeze.collection.mutable.SparseArray
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.mllib.tree.config.Algo._
@@ -28,7 +28,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
 
   var curLeaves = 0
 
-  def run(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  def run(trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
@@ -221,7 +221,7 @@ class LambdaMARTDecisionTree(val strategy: Strategy,
 }
 
 object LambdaMARTDecisionTree extends Serializable with Logging {
-  def findBestSplits(trainingData: RDD[(Int, SparseVector[Short], Array[SplitInfo])],
+  def findBestSplits(trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])],
     trainingData_T: RDD[(Int, Array[Array[Short]])],
     lambdasBc: Broadcast[Array[Double]],
     weightsBc: Broadcast[Array[Double]],
@@ -275,17 +275,17 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
         }
         algo match {
           case LambdaMart=>
-            val layerSplit=false
-            if(layerSplit){
-               binsToBestSplitLayer(histograms, splits, lcNodesInfo, entropyCoefft, featureUseCount,
-                featureFirstUsePenalty, featureReusePenalty, minInstancesPerNode = minDocPerNode)
-            }
-            else{
-              Array.tabulate(numNodes)(ni => binsToBestSplitForLambdaMart(histograms(ni), splits, lcNodesInfo(ni), entropyCoefft, featureUseCount,
+//            val layerSplit=false
+//            if(layerSplit){
+//               binsToBestSplitLayer(histograms, sparseSamples.default, splits, lcNodesInfo, entropyCoefft, featureUseCount,
+//                featureFirstUsePenalty, featureReusePenalty, minInstancesPerNode = minDocPerNode)
+//            }
+//            else{
+              Array.tabulate(numNodes)(ni => binsToBestSplitForLambdaMart(histograms(ni), sparseSamples.default, splits, lcNodesInfo(ni), entropyCoefft, featureUseCount,
           featureFirstUsePenalty, featureReusePenalty, minInstancesPerNode = minDocPerNode))
-            }
+//            }
           case Regression=>
-            Array.tabulate(numNodes)(ni => binsToBestSplitForClassfication(histograms(ni), splits, lcNodesInfo(ni)))
+            Array.tabulate(numNodes)(ni => binsToBestSplitForClassfication(histograms(ni), sparseSamples.default, splits, lcNodesInfo(ni)))
         }
       }
     }
@@ -391,7 +391,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 
   // TODO: make minInfoGain parameterized
   // for lambdaMart
-  def binsToBestSplitForLambdaMart(hist: Histogram,
+  def binsToBestSplitForLambdaMart(hist: Histogram, defaultBin:Int,
     splits: Array[SplitInfo],
     nodeInfo: NodeInfoStats,
     entropyCoefft: Double,
@@ -407,7 +407,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
 
     val feature = splits(0).feature
 
-    val cumHist = hist.cumulate(nodeInfo)
+    val cumHist = hist.cumulate(nodeInfo, defaultBin)
 
     //val denom = if (sumWeight == 0.0) totalDocInNode else sumWeight
     val varianceTargets = (nodeInfo.sumSquares - nodeInfo.sumScores / nodeInfo.sumCount) / (nodeInfo.sumCount - 1)
@@ -502,7 +502,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
   }
 
   // for classification
-  def binsToBestSplitForClassfication(hist: Histogram,
+  def binsToBestSplitForClassfication(hist: Histogram, defaultBin:Int,
                       splits: Array[SplitInfo],
                       nodeInfo: NodeInfoStats,
                       minInstancesPerNode: Int = 1): ((SplitInfo, Short), InformationGainStats, Double, NodeInfoStats, NodeInfoStats) = {
@@ -512,7 +512,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       * val sumWeights = hist.scoreWeights **/
 
     val feature = splits(0).feature
-    val cumHist = hist.cumulate(nodeInfo)
+    val cumHist = hist.cumulate(nodeInfo, defaultBin)
 
     //gain=impurity-leftWeight*leftImpurity-rightWeight*rightImpurity
 
@@ -579,7 +579,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
   }
 
   // for lambdaMart
-  def binsToBestSplitLayer(hists: Array[Histogram],
+  def binsToBestSplitLayer(hists: Array[Histogram],defaultBin:Int,
                                    splits: Array[SplitInfo],
                                    nodeInfos: Array[NodeInfoStats],
                                    entropyCoefft: Double,
@@ -592,7 +592,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
     val feature = splits(0).feature
     val numNodes = hists.length
 
-    val cumHists = Array.tabulate(numNodes){ni => hists(ni).cumulate(nodeInfos(ni))}
+    val cumHists = Array.tabulate(numNodes){ni => hists(ni).cumulate(nodeInfos(ni), defaultBin)}
 
     val gainConfidenceLevel = 0.0
     var gainConfidenceInSquaredStandardDeviations = ProbabilityFunctions.Probit(1.0 - (1.0 - gainConfidenceLevel) * 0.5)
