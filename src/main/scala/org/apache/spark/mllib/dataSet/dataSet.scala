@@ -8,6 +8,8 @@ import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 
+import scala.collection.mutable
+
 /**
   * Created by jlinleung on 2016/5/1.
   */
@@ -38,7 +40,7 @@ class dataSet(label: Array[Short] = null,
 }
 
 
-object dataSetLoader{
+object dataSetLoader {
 
   def loadData(sc: SparkContext, path: String, minPartitions: Int)
   : RDD[(Int, SparseVector[Short], Array[SplitInfo])] = {
@@ -79,6 +81,163 @@ object dataSetLoader{
     }.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
   }
 
+  def loadTrainingDataForLambdamart(sc: SparkContext, path: String, minPartitions: Int,
+                                    sampleQueryId: Array[Int], QueryBound: Array[Int], numSampling: Int)
+  : RDD[(Int, SparseArray[Short], Array[SplitInfo])] = {
+    var rdd = sc.textFile(path, minPartitions).map { line =>
+      val parts = line.split("#")
+      val feat = parts(0).toInt
+      val samples = parts(1).split(',').map(_.toShort)
+      var is = 0
+      // sampling data
+      val samplingData = if (sampleQueryId == null) samples
+      else {
+        val sd = new Array[Short](numSampling)
+        var it = 0
+        var icur = 0
+        while (it < sampleQueryId.length) {
+          val query = sampleQueryId(it)
+          for (is <- QueryBound(query) until QueryBound(query + 1)) {
+            sd(icur) = samples(is)
+            icur += 1
+          }
+          it += 1
+        }
+        sd
+      }
+
+      //      // Sparse data
+      //      is = 0
+      //      var nnz = 0
+      //      while (is < samplingData.length) {
+      //        if (samplingData(is) != 0) {
+      //          nnz += 1
+      //        }
+      //        is += 1
+      //      }
+      //      val idx = new Array[Int](nnz)
+      //      val vas = new Array[Short](nnz)
+      //      is = 0
+      //      nnz = 0
+      //      while (is < samplingData.length) {
+      //        if (samplingData(is) != 0) {
+      //          idx(nnz) = is
+      //          vas(nnz) = samplingData(is)
+      //          nnz += 1
+      //        }
+      //        is += 1
+      //      }
+      //      val sparseSamples = new SparseVector[Short](idx, vas, nnz, is)
+
+      val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
+      is = 0
+      while (is < samplingData.length) {
+        v2no(samplingData(is)) += 1
+        is += 1
+      }
+      val (default, numDefault) = v2no.maxBy(x => x._2)
+      val numAct = samplingData.length - numDefault
+      val idx = new Array[Int](numAct)
+      val vas = new Array[Short](numAct)
+      is = 0
+      var nnz = 0
+      while (is < samplingData.length) {
+        if (samplingData(is) != default) {
+          idx(nnz) = is
+          vas(nnz) = samplingData(is)
+          nnz += 1
+        }
+        is += 1
+      }
+      val sparseSamples = new SparseArray[Short](idx, vas, nnz, is, default)
+
+      //      val sparseSamples = new SparseVector[Short](sparseArr)
+
+
+      val splits = if (parts.length > 2) {
+        parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
+      } else {
+        val maxFeat = samples.max + 1
+        Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
+      }
+      (feat, sparseSamples, splits)
+    }
+    rdd = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
+      case Some(np) =>
+        println("repartitioning")
+        rdd.sortBy(x => x._1, numPartitions = np)
+
+      case None => rdd
+    }
+
+    rdd.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
+  }
+
+  def loadTrainingDataForClassification(sc: SparkContext, path: String, minPartitions: Int, numDoc: Int)
+  : RDD[(Int, SparseArray[Short], Array[SplitInfo])] = {
+    var rdd = sc.textFile(path, minPartitions).map { line =>
+      val parts = line.split("#")
+      val feat = parts(0).toInt
+      val samples = parts(1).split(',').map(_.toShort)
+      var is = 0
+      // sampling data
+      val samplingData = if (numDoc == samples.length) {
+        samples
+      }
+      else if(numDoc<samples.length){
+        samples.take(numDoc)
+      }
+      else {
+        val arr = new Array[Short](numDoc)
+        while(is<numDoc){
+          arr(is)=samples(is%samples.length)
+          is+=1
+        }
+        arr
+      }
+
+      val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
+      is = 0
+      while (is < samplingData.length) {
+        v2no(samplingData(is)) += 1
+        is += 1
+      }
+      val (default, numDefault) = v2no.maxBy(x => x._2)
+      val numAct = samplingData.length - numDefault
+      val idx = new Array[Int](numAct)
+      val vas = new Array[Short](numAct)
+      is = 0
+      var nnz = 0
+      while (is < samplingData.length) {
+        if (samplingData(is) != default) {
+          idx(nnz) = is
+          vas(nnz) = samplingData(is)
+          nnz += 1
+        }
+        is += 1
+      }
+      val sparseSamples = new SparseArray[Short](idx, vas, nnz, numDoc, default)
+
+      val splits = if (parts.length > 2) {
+        parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
+      } else {
+        val maxFeat = samples.max + 1
+        Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
+      }
+      (feat, sparseSamples, splits)
+    }
+
+    rdd = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
+      case Some(np) =>
+        println("repartitioning")
+        rdd.sortBy(x => x._1, numPartitions = np)
+
+      case None => rdd
+    }
+
+    rdd.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
+  }
+
   def loadDataTransposed(sc: SparkContext, path: String): RDD[(Int, org.apache.spark.mllib.linalg.Vector)] = {
     sc.textFile(path).map { line =>
       val parts = line.split("#")
@@ -116,7 +275,7 @@ object dataSetLoader{
   }
 
   def loadFeature2NameMap(sc: SparkContext, path: String): Array[String] = {
-    sc.textFile(path).map( line => line.split("#")(1)).collect()
+    sc.textFile(path).map(line => line.split("#")(1)).collect()
   }
 
   def getSampleLabels(testQueryId: Array[Int], QueryBound: Array[Int], labels: Array[Short]): Array[Short] = {
@@ -164,22 +323,22 @@ object dataSetLoader{
   }
 
   def getSampleFeatureData(sc: SparkContext, trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])], sampleFeatPct: Double) = {
-//    def IsSeleted(ffraction: Double): Boolean = {
-//      val randomNum = scala.util.Random.nextDouble()
-//      var active = false
-//      if(randomNum < ffraction)
-//      {
-//        active = true
-//      }
-//      active
-//    }
+    //    def IsSeleted(ffraction: Double): Boolean = {
+    //      val randomNum = scala.util.Random.nextDouble()
+    //      var active = false
+    //      if(randomNum < ffraction)
+    //      {
+    //        active = true
+    //      }
+    //      active
+    //    }
     val rdd = if (sampleFeatPct < 1.0) {
       var sampleData = trainingData.sample(false, sampleFeatPct)
-//      sampleData = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
-//        case Some(np) => sampleData.sortBy(x => x._1, numPartitions = np)
-//        case None => sampleData
-//      }
-//      val sampleData = trainingData.filter(item =>IsSeleted(sampleFeatPct))
+      //      sampleData = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
+      //        case Some(np) => sampleData.sortBy(x => x._1, numPartitions = np)
+      //        case None => sampleData
+      //      }
+      //      val sampleData = trainingData.filter(item =>IsSeleted(sampleFeatPct))
       val numFeats_S = sampleData.count()
       println(s"numFeats_sampling: $numFeats_S")
       println(s"numPartitions_sampling: ${sampleData.partitions.length}")

@@ -3,12 +3,13 @@ package org.apache.spark.examples.mllib
 import breeze.collection.mutable.SparseArray
 import org.apache.hadoop.fs.Path
 import org.apache.spark.mllib.dataSet.{dataSet, dataSetLoader}
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.mllib.tree.config.Algo
 import org.apache.spark.mllib.tree.model.SplitInfo
 import org.apache.spark.mllib.tree.model.ensemblemodels.GradientBoostedDecisionTreesModel
 import org.apache.spark.mllib.tree.{DerivativeCalculator, LambdaMART, config}
-import org.apache.spark.mllib.util.{TreeUtils, treeAggregatorFormat}
+import org.apache.spark.mllib.util.{MLUtils, TreeUtils, treeAggregatorFormat}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
@@ -49,7 +50,8 @@ object LambdaMARTRunner {
                var testSpan: Int = 0,
                var sampleFeaturePercent: Double = 1.0,
                var sampleQueryPercent: Double = 1.0,
-               var numPartitions: Int = 0,
+               var sampleDocPercent: Double = 1.0,
+               var numPartitions: Int = 160,
                var ffraction: Double = 1.0,
                var sfraction: Double = 1.0,
                var secondaryMS: Double = 0.0,
@@ -84,17 +86,14 @@ object LambdaMARTRunner {
     override def toString: String = {
       val propertiesStr = s"trainingData = $trainingData\nqueryBoundy = $queryBoundy\nlabel = $label\ninitScores = $initScores\n" +
         s"testData = $testData\ntestQueryBound = $testQueryBound\ntestLabel = $testLabel\ntestSpan = $testSpan\n" +
-        s"sampleFeaturePercent = $sampleFeaturePercent\nsampleQueryPercent = $sampleQueryPercent" +
+        s"sampleFeaturePercent = $sampleFeaturePercent\nsampleQueryPercent = $sampleQueryPercent\nsampleDocPercent = $sampleDocPercent\n" +
         s"outputTreeEnsemble = $outputTreeEnsemble\nfeatureNoToFriendlyName = $featureNoToFriendlyName\nvalidationData = $validationData\n" +
         s"queryBoundyValidate = $queryBoundyValidate\ninitScoreValidate = $initScoreValidate\nlabelValidate = $labelValidate\n" +
         s"expandTreeEnsemble = $expandTreeEnsemble\nfeatureIniFile = $featureIniFile\ngainTableStr = $gainTableStr\n" +
         s"algo = $algo\nmaxDepth = ${maxDepth.mkString(":")}\nnumLeaves = $numLeaves\nnumPruningLeaves = ${numPruningLeaves.mkString(":")}\nnumIterations = ${numIterations.mkString(":")}\nmaxSplits = $maxSplits\n" +
-        s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsfraction = $sfraction\nsecondaryMS = $secondaryMS\n" +
-        s"secondaryLE = $secondaryLE\nsigma = $sigma\ndistanceWeight2 = $distanceWeight2\nbaselineAlphaFilename = $baselineAlphaFilename\nentropyCoefft = $entropyCoefft\n" +
-        s"featureFirstUsePenalty = $featureFirstUsePenalty\nfeatureReusePenalty = $featureReusePenalty\nlearningStrategy = $learningStrategy\noutputNdcgFilename = $outputNdcgFilename\n" +
-        s"active_lambda_learningStrategy = $active_lambda_learningStrategy\nrho_lambda = $rho_lambda\nactive_leaves_value_learningStrategy = $active_leaves_value_learningStrategy\n" +
-        s"rho_leave = $rho_leave\nGainNormalization = $GainNormalization\nfeature2NameFile = $feature2NameFile\nvalidationSpan = $validationSpan\n" +
-        s"useEarlystop = $useEarlystop\n"
+        s"learningRate = ${learningRate.mkString(":")}\nminInstancesPerNode = ${minInstancesPerNode.mkString(":")}\nffraction = $ffraction\nsfraction = $sfraction\n"
+
+
       propertiesStr
     }
   }
@@ -108,7 +107,7 @@ object LambdaMARTRunner {
       opt[String]("trainingData") required() foreach { x =>
         defaultParams.trainingData = x
       } text ("trainingData path")
-      opt[String]("queryBoundy") required() foreach { x =>
+      opt[String]("queryBoundy") optional() foreach { x =>
         defaultParams.queryBoundy = x
       } text ("queryBoundy path")
       opt[String]("label") required() foreach { x =>
@@ -187,7 +186,7 @@ object LambdaMARTRunner {
         defaultParams.testSpan = x
       } text (s"test span")
       opt[Int]("numPartitions") optional() foreach { x =>
-        defaultParams.validationSpan = x
+        defaultParams.numPartitions = x
       } text (s"number of partitions, default: ${defaultParams.numPartitions}")
       opt[Double]("sampleFeaturePercent") optional() foreach { x =>
         defaultParams.sampleFeaturePercent = x
@@ -195,6 +194,9 @@ object LambdaMARTRunner {
       opt[Double]("sampleQueryPercent") optional() foreach { x =>
         defaultParams.sampleQueryPercent = x
       } text (s"global query percentage used for training")
+      opt[Double]("sampleDocPercent") optional() foreach { x =>
+        defaultParams.sampleDocPercent = x
+      } text (s"global doc percentage used for classification")
       opt[Double]("ffraction") optional() foreach { x =>
         defaultParams.ffraction = x
       } text (s"feature percentage used for training for each tree")
@@ -282,7 +284,7 @@ object LambdaMARTRunner {
       s"numiterations: ${params.numIterations}, learningRate: ${params.learningRate}, " +
         s"and minInstancesPerNode: ${params.minInstancesPerNode}, numPruningLeaves: ${params.numPruningLeaves}do not match")
 
-    require(!params.maxDepth.exists(dep => dep>30), s"value maxDepth:${params.maxDepth} incorrect; should be less than or equals to 30.")
+    require(!params.maxDepth.exists(dep => dep > 30), s"value maxDepth:${params.maxDepth} incorrect; should be less than or equals to 30.")
 
 
     println(s"LambdaMARTRunner with parameters:\n${params.toString}")
@@ -303,9 +305,9 @@ object LambdaMARTRunner {
         require(loaded.length == numSamples, s"lengthOfInitScores: ${loaded.length} != numSamples: $numSamples")
         loaded
       }
-      var queryBoundy = if (params.queryBoundy!=null) dataSetLoader.loadQueryBoundy(sc, params.queryBoundy) else null
-      require(queryBoundy==null || queryBoundy.last == numSamples , s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
-      val numQuery = if(queryBoundy!=null) queryBoundy.length - 1 else 0
+      var queryBoundy = if (params.queryBoundy != null) dataSetLoader.loadQueryBoundy(sc, params.queryBoundy) else null
+      require(queryBoundy == null || queryBoundy.last == numSamples, s"QueryBoundy ${queryBoundy.last} does not match with data $numSamples !")
+      val numQuery = if (queryBoundy != null) queryBoundy.length - 1 else 0
       println(s"num of data query: $numQuery")
 
       val numSampleQuery = if (params.sampleQueryPercent < 1) (numQuery * params.sampleQueryPercent).toInt else numQuery
@@ -314,15 +316,40 @@ object LambdaMARTRunner {
         (new Random(Random.nextInt)).shuffle((0 until queryBoundy.length - 1).toList).take(numSampleQuery).toArray
       } else null //query index for training
 
-      if (params.sampleQueryPercent < 1) {
+      if (params.algo=="LambdaMart"&&params.sampleQueryPercent < 1) {
         // sampling
         label = dataSetLoader.getSampleLabels(sampleQueryId, queryBoundy, label)
         println(s"num of sampling labels: ${label.length}")
         initScores = dataSetLoader.getSampleInitScores(sampleQueryId, queryBoundy, initScores, label.length)
         require(label.length == initScores.length, s"num of labels ${label.length} does not match with initScores ${initScores.length}!")
       }
-      var trainingData = loadTrainingData(sc, params.trainingData, sc.defaultMinPartitions, sampleQueryId, queryBoundy, label.length)
+      else if(params.algo=="Classification" && params.sampleDocPercent!=1){
+        val numDocSampling = (params.sampleDocPercent * numSamples).toInt
+        if (params.sampleDocPercent<1) {
+          label = label.take(numDocSampling)
+          initScores = initScores.take(numDocSampling)
+        }
+        else{
+          val newLabel = new Array[Short](numDocSampling)
+          val newScores = new Array[Double](numDocSampling)
+          var is = 0
+          while(is<numDocSampling){
+            newLabel(is)=label(is%numSamples)
+            newScores(is)=label(is%numSamples)
+            is+=1
+          }
+          label = newLabel
+          initScores = newScores
+        }
+        println(s"num of sampling labels: ${label.length}")
+        require(label.length == initScores.length, s"num of labels ${label.length} does not match with initScores ${initScores.length}!")
+      }
 
+      var trainingData =
+      if(params.algo=="LambdaMart")
+          dataSetLoader.loadTrainingDataForLambdamart(sc, params.trainingData, sc.defaultMinPartitions, sampleQueryId, queryBoundy, label.length)
+      else
+        dataSetLoader.loadTrainingDataForClassification(sc, params.trainingData, sc.defaultMinPartitions, label.length)
 
       if (params.sampleQueryPercent < 1) {
         queryBoundy = dataSetLoader.getSampleQueryBound(sampleQueryId, queryBoundy)
@@ -330,15 +357,15 @@ object LambdaMARTRunner {
       }
       val numFeats = trainingData.count().toInt
       println(s"numFeats: $numFeats")
-      val numNonZeros = trainingData.map{x => x._2.default}.filter(_!=0).count()
-      println(s"numFeats sparse on nonZero: $numNonZeros")
+//      val numNonZeros = trainingData.map { x => x._2.default }.filter(_ != 0).count()
+//      println(s"numFeats sparse on nonZero: $numNonZeros")
 
       val trainingData_T = genTransposedData(trainingData, numFeats, label.length)
 
       trainingData = dataSetLoader.getSampleFeatureData(sc, trainingData, params.sampleFeaturePercent)
 
-      if(params.algo=="Classification"){
-        label=label.map(x=>(x*2-1).toShort)
+      if (params.algo == "Classification") {
+        label = label.map(x => (x * 2 - 1).toShort)
       }
 
       val trainingDataSet = new dataSet(label, initScores, queryBoundy, trainingData)
@@ -354,7 +381,7 @@ object LambdaMARTRunner {
           dataSetLoader.loadInitScores(sc, params.initScoreValidate)
         }
 
-        val queryBoundyV = if(params.queryBoundy!=null)dataSetLoader.loadQueryBoundy(sc, params.queryBoundyValidate) else null
+        val queryBoundyV = if (params.queryBoundy != null) dataSetLoader.loadQueryBoundy(sc, params.queryBoundyValidate) else null
 
         validtionDataSet = new dataSet(labelV, initScoreV, queryBoundyV, dataTransposed = validationData)
       }
@@ -364,6 +391,7 @@ object LambdaMARTRunner {
       val gainTable = params.gainTableStr.split(':').map(_.toDouble)
 
       val boostingStrategy = config.BoostingStrategy.defaultParams(params.algo)
+      boostingStrategy.treeStrategy.maxDepth = params.maxDepth(0)
 
 
       //extract secondGain and secondInverseMaxDcg
@@ -384,11 +412,11 @@ object LambdaMARTRunner {
 
       if (params.sampleWeightsFilename != null) {
         val spTf = sc.textFile(params.sampleWeightsFilename)
-        if (spTf.count() >0)
+        if (spTf.count() > 0)
           params.sampleWeights = spTf.first().split(",").map(_.toDouble)
       }
 
-      if (params.baselineDcgsFilename!=null) {
+      if (params.baselineDcgsFilename != null) {
         val spTf = sc.textFile(params.baselineDcgsFilename)
         if (spTf.count() > 0)
           params.baselineDcgs = spTf.first().split(",").map(_.toDouble)
@@ -401,7 +429,7 @@ object LambdaMARTRunner {
       }
 
       val feature2Gain = new Array[Double](numFeats)
-      if (params.algo == "LambdaMart" || params.algo=="Classification") {
+      if (params.algo == "LambdaMart" || params.algo == "Classification") {
         val startTime = System.nanoTime()
         val model = LambdaMART.train(trainingDataSet, validtionDataSet, trainingData_T, gainTable,
           boostingStrategy, params, feature2Gain)
@@ -409,12 +437,34 @@ object LambdaMARTRunner {
         println(s"Training time: $elapsedTime seconds")
 
         // test
-        if (params.testSpan != 0) {
+        if (params.algo == "LambdaMart" && params.testSpan != 0) {
           val testNDCG = testModel(sc, model, params, gainTable)
           println(s"testNDCG error 0 = " + testNDCG(0))
           for (i <- 1 until testNDCG.length) {
             val it = i * params.testSpan
             println(s"testNDCG error $it = " + testNDCG(i))
+          }
+        }
+        else if (params.algo == "Classification" && params.testData != null) {
+          val testData = MLUtils.loadLibSVMFile(sc, params.testData)
+          println(s"numSamples: ${testData.count()}")
+          val scoreAndLabels = testData.map { point =>
+            val predictions =  model.trees.map(_.predict(point.features))
+            val claPred = new Array[Double](predictions.length)
+            Range(1,predictions.length).foreach{it=>
+              predictions(it)+=predictions(it-1)
+              if(predictions(it)>=0) claPred(it)=1.0
+              else claPred(it)=0.0
+            }
+
+            (claPred, point.label)
+          }
+
+          Range(0,model.trees.length, params.testSpan).foreach{it=>
+            val scoreLabel = scoreAndLabels.map{case(claPred, lb)=>(claPred(it),lb)}
+            val metrics = new BinaryClassificationMetrics(scoreLabel)
+            val accuracy = metrics.areaUnderROC()
+            println(s"Accuracy $it = $accuracy")
           }
         }
 
@@ -433,7 +483,7 @@ object LambdaMARTRunner {
         val evalNodes = Array.tabulate[Int](totalEvaluators)(_ + 1)
         treeAggregatorFormat.appendTreeAggregator(params.expandTreeEnsemble, "treeEnsemble.ini", totalEvaluators + 1, evalNodes)
 
-        if (params.feature2NameFile!=null) {
+        if (params.feature2NameFile != null) {
           val feature2Name = dataSetLoader.loadFeature2NameMap(sc, params.feature2NameFile)
           treeAggregatorFormat.toCommentFormat("treeEnsemble.ini", params, feature2Name, feature2Gain)
         }
@@ -454,99 +504,15 @@ object LambdaMARTRunner {
     }
   }
 
-  def loadTrainingData(sc: SparkContext, path: String, minPartitions: Int,
-                       sampleQueryId: Array[Int], QueryBound: Array[Int], numSampling: Int)
-  : RDD[(Int, SparseArray[Short], Array[SplitInfo])] = {
-    var rdd = sc.textFile(path, minPartitions).map { line =>
-      val parts = line.split("#")
-      val feat = parts(0).toInt
-      val samples = parts(1).split(',').map(_.toShort) // input samples
-    var is = 0
-      // sampling data
-      val samplingData = if (sampleQueryId == null) samples
-      else {
-        val sd = new Array[Short](numSampling)
-        var it = 0
-        var icur = 0
-        while (it < sampleQueryId.length) {
-          val query = sampleQueryId(it)
-          for (is <- QueryBound(query) until QueryBound(query + 1)) {
-            sd(icur) = samples(is)
-            icur += 1
-          }
-          it += 1
-        }
-        sd
-      }
-//      // Sparse data
-//      is = 0
-//      var nnz = 0
-//      while (is < samplingData.length) {
-//        if (samplingData(is) != 0) {
-//          nnz += 1
-//        }
-//        is += 1
-//      }
-//      val idx = new Array[Int](nnz)
-//      val vas = new Array[Short](nnz)
-//      is = 0
-//      nnz = 0
-//      while (is < samplingData.length) {
-//        if (samplingData(is) != 0) {
-//          idx(nnz) = is
-//          vas(nnz) = samplingData(is)
-//          nnz += 1
-//        }
-//        is += 1
-//      }
-//      val sparseSamples = new SparseVector[Short](idx, vas, nnz, is)
 
-      val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
-      is = 0
-      while (is < samplingData.length) {
-        v2no(samplingData(is))+=1
-        is += 1
-      }
-      val (default, numDefault) = v2no.maxBy(x=>x._2)
-      val numAct = samplingData.length - numDefault
-      val idx = new Array[Int](numAct)
-      val vas = new Array[Short](numAct)
-      is = 0
-      var nnz = 0
-      while (is < samplingData.length) {
-        if (samplingData(is) != default) {
-          idx(nnz) = is
-          vas(nnz) = samplingData(is)
-          nnz += 1
-        }
-        is += 1
-      }
-      val sparseSamples = new SparseArray[Short](idx, vas, nnz, is, default)
-
-//      val sparseSamples = new SparseVector[Short](sparseArr)
-
-
-      val splits = if (parts.length > 2) {
-        parts(2).split(',').map(threshold => new SplitInfo(feat, threshold.toDouble))
-      } else {
-        val maxFeat = samples.max + 1
-        Array.tabulate(maxFeat)(threshold => new SplitInfo(feat, threshold))
-      }
-      (feat, sparseSamples, splits)
-    }
-    rdd = sc.getConf.getOption("lambdaMart_numPartitions").map(_.toInt) match {
-      case Some(np) => rdd.sortBy(x => x._1, numPartitions = np)
-      case None => rdd
-    }
-    rdd.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData")
-  }
 
   def loadTestData(sc: SparkContext, path: String): RDD[Vector] = {
-        sc.textFile(path).map{line =>
-          if(line.contains("#"))
-            Vectors.dense(line.split("#")(1).split(",").map(_.toDouble))
-          else
-            Vectors.dense(line.split(",").map(_.toDouble))}
+    sc.textFile(path).map { line =>
+      if (line.contains("#"))
+        Vectors.dense(line.split("#")(1).split(",").map(_.toDouble))
+      else
+        Vectors.dense(line.split(",").map(_.toDouble))
+    }
 
 
     //    val testData = sc.textFile(path).map {line => line.split("#")(1).split(",").map(_.toDouble)}
@@ -564,7 +530,7 @@ object LambdaMARTRunner {
 
   def genTransposedData(trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])],
                         numFeats: Int,
-                        numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
+                        numSamples: Int): RDD[(Int, Array[SparseArray[Short]])] = {
     println("generating transposed data...")
     // validate that the original data is ordered
     val denseAsc = trainingData.mapPartitions { iter =>
@@ -602,11 +568,34 @@ object LambdaMARTRunner {
       Range(0, numPartitions).iterator.map(pi => (pi, (fiMin, blocksPP(pi))))
     }.partitionBy(new HashPartitioner(numPartitions)).mapPartitionsWithIndex((pid, iter) => {
       val siMin = siMinPP(pid)
-      val sampleSlice = new Array[Array[Short]](numFeats)
+      val sampleSlice = new Array[SparseArray[Short]](numFeats)
       iter.foreach { case (_, (fiMin, blocks)) =>
         var lfi = 0
         while (lfi < blocks.length) {
-          sampleSlice(lfi + fiMin) = blocks(lfi)
+
+          val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
+          var is = 0
+          while (is < blocks(lfi).length) {
+            v2no(blocks(lfi)(is)) += 1
+            is += 1
+          }
+          val (default, numDefault) = v2no.maxBy(x => x._2)
+          val numAct = blocks(lfi).length - numDefault
+          val idx = new Array[Int](numAct)
+          val vas = new Array[Short](numAct)
+          is = 0
+          var nnz = 0
+          while (is < blocks(lfi).length) {
+            if (blocks(lfi)(is) != default) {
+              idx(nnz) = is
+              vas(nnz) = blocks(lfi)(is)
+              nnz += 1
+            }
+            is += 1
+          }
+          val sparseSamples = new SparseArray[Short](idx, vas, nnz, blocks(lfi).length, default)
+
+          sampleSlice(lfi + fiMin) = sparseSamples
           lfi += 1
         }
       }
@@ -615,8 +604,6 @@ object LambdaMARTRunner {
     trainingData_T.persist(StorageLevel.MEMORY_AND_DISK).setName("trainingData_T").count()
     trainingData_T
   }
-
-
 
   def testModel(sc: SparkContext, model: GradientBoostedDecisionTreesModel, params: Params, gainTable: Array[Double]): Array[Double] = {
     val testData = loadTestData(sc, params.testData).cache().setName("TestData")
@@ -638,12 +625,12 @@ object LambdaMARTRunner {
       }
 
       scores.zipWithIndex.collect {
-        case (score, it) if it ==0 || (it+1)% rate == 0 => score
+        case (score, it) if it == 0 || (it + 1) % rate == 0 => score
       }
     }
-    val predictionsByIter =predictions.zipWithIndex.flatMap {
+    val predictionsByIter = predictions.zipWithIndex.flatMap {
       case (row, rowIndex) => row.zipWithIndex.map {
-        case (number, columnIndex) => columnIndex -> (rowIndex, number)
+        case (number, columnIndex) => columnIndex ->(rowIndex, number)
       }
     }.groupByKey.sortByKey().values
       .map {
@@ -668,7 +655,7 @@ object LambdaMARTRunner {
 
     predictionsByIter.map { scores =>
       val dc = dcBc.value
-      dc.getPartErrors(scores, 0, numQueries)/ numQueries
+      dc.getPartErrors(scores, 0, numQueries) / numQueries
     }.collect()
 
   }
