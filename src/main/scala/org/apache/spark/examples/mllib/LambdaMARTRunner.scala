@@ -15,7 +15,6 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{HashPartitioner, SparkConf, SparkContext}
 import scopt.OptionParser
 
-import scala.collection.mutable
 import scala.language.reflectiveCalls
 import scala.util.Random
 
@@ -530,7 +529,7 @@ object LambdaMARTRunner {
 
   def genTransposedData(trainingData: RDD[(Int, SparseArray[Short], Array[SplitInfo])],
                         numFeats: Int,
-                        numSamples: Int): RDD[(Int, Array[SparseArray[Short]])] = {
+                        numSamples: Int): RDD[(Int, Array[Array[Short]])] = {
     println("generating transposed data...")
     // validate that the original data is ordered
     val denseAsc = trainingData.mapPartitions { iter =>
@@ -568,34 +567,11 @@ object LambdaMARTRunner {
       Range(0, numPartitions).iterator.map(pi => (pi, (fiMin, blocksPP(pi))))
     }.partitionBy(new HashPartitioner(numPartitions)).mapPartitionsWithIndex((pid, iter) => {
       val siMin = siMinPP(pid)
-      val sampleSlice = new Array[SparseArray[Short]](numFeats)
+      val sampleSlice = new Array[Array[Short]](numFeats)
       iter.foreach { case (_, (fiMin, blocks)) =>
         var lfi = 0
         while (lfi < blocks.length) {
-
-          val v2no = new mutable.HashMap[Short, Int]().withDefaultValue(0)
-          var is = 0
-          while (is < blocks(lfi).length) {
-            v2no(blocks(lfi)(is)) += 1
-            is += 1
-          }
-          val (default, numDefault) = v2no.maxBy(x => x._2)
-          val numAct = blocks(lfi).length - numDefault
-          val idx = new Array[Int](numAct)
-          val vas = new Array[Short](numAct)
-          is = 0
-          var nnz = 0
-          while (is < blocks(lfi).length) {
-            if (blocks(lfi)(is) != default) {
-              idx(nnz) = is
-              vas(nnz) = blocks(lfi)(is)
-              nnz += 1
-            }
-            is += 1
-          }
-          val sparseSamples = new SparseArray[Short](idx, vas, nnz, blocks(lfi).length, default)
-
-          sampleSlice(lfi + fiMin) = sparseSamples
+          sampleSlice(lfi + fiMin) = blocks(lfi)
           lfi += 1
         }
       }

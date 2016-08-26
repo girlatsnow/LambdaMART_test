@@ -3,13 +3,13 @@ package org.apache.spark.mllib.tree
 //import akka.io.Udp.SO.Broadcast
 import java.io.{File, FileOutputStream, PrintWriter}
 
-import breeze.collection.mutable.SparseArray
 import breeze.linalg.min
 import org.apache.hadoop.fs.Path
 import org.apache.spark.Logging
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.examples.mllib.LambdaMARTRunner.Params
 import org.apache.spark.mllib.dataSet.dataSet
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
 import org.apache.spark.mllib.tree.config.Algo._
 import org.apache.spark.mllib.tree.config.BoostingStrategy
 import org.apache.spark.mllib.tree.impl.TimeTracker
@@ -25,7 +25,7 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
                  val params: Params) extends Serializable with Logging {
   def run(trainingDataSet: dataSet,
           validateDataSet: dataSet,
-          trainingData_T: RDD[(Int, Array[SparseArray[Short]])],
+          trainingData_T: RDD[(Int, Array[Array[Short]])],
           gainTable: Array[Double],
           feature2Gain: Array[Double]): GradientBoostedDecisionTreesModel = {
     val algo = boostingStrategy.treeStrategy.algo
@@ -50,7 +50,7 @@ class LambdaMART(val boostingStrategy: BoostingStrategy,
 object LambdaMART extends Logging {
   def train(trainingDataSet: dataSet,
             validateDataSet: dataSet,
-            trainingData_T: RDD[(Int, Array[SparseArray[Short]])],
+            trainingData_T: RDD[(Int, Array[Array[Short]])],
             gainTable: Array[Double],
             boostingStrategy: BoostingStrategy,
             params: Params,
@@ -62,7 +62,7 @@ object LambdaMART extends Logging {
 
   private def boostMart(trainingDataSet: dataSet,
                         validateDataSet: dataSet,
-                        trainingData_T: RDD[(Int, Array[SparseArray[Short]])],
+                        trainingData_T: RDD[(Int, Array[Array[Short]])],
                         gainTable: Array[Double],
                         boostingStrategy: BoostingStrategy,
                         params: Params,
@@ -177,17 +177,17 @@ object LambdaMART extends Logging {
             }
           }
           //          else if (learningStrategy == "adagrad") {
-//            Range(0, numSamples).par.foreach { si =>
-//              oldRep(si) += lambdas(si) * lambdas(si)
-//              lambdas(si) = lambdas(si) / math.sqrt(oldRep(si) + 1e-9)
-//            }
-//          }
-//          else if (learningStrategy == "adadelta") {
-//            Range(0, numSamples).par.foreach { si =>
-//              oldRep(si) = rho_lambda * oldRep(si) + (1 - rho_lambda) * lambdas(si) * lambdas(si)
-//              lambdas(si) = learningRate(phase) * lambdas(si) / scala.math.sqrt(oldRep(si) + 1e-9)
-//            }
-//          }
+          //            Range(0, numSamples).par.foreach { si =>
+          //              oldRep(si) += lambdas(si) * lambdas(si)
+          //              lambdas(si) = lambdas(si) / math.sqrt(oldRep(si) + 1e-9)
+          //            }
+          //          }
+          //          else if (learningStrategy == "adadelta") {
+          //            Range(0, numSamples).par.foreach { si =>
+          //              oldRep(si) = rho_lambda * oldRep(si) + (1 - rho_lambda) * lambdas(si) * lambdas(si)
+          //              lambdas(si) = learningRate(phase) * lambdas(si) / scala.math.sqrt(oldRep(si) + 1e-9)
+          //            }
+          //          }
         }
 
         val lambdasBc = sc.broadcast(lambdas)
@@ -240,7 +240,6 @@ object LambdaMART extends Logging {
           currentScores(si) += baseLearnerWeights(m) * treeScores(si)
         )
         //testing continue training
-
 
 
         /**
@@ -350,7 +349,7 @@ object LambdaMART extends Logging {
 
   private def boostRegression(trainingDataSet: dataSet,
                               validateDataSet: dataSet,
-                              trainingData_T: RDD[(Int, Array[SparseArray[Short]])],
+                              trainingData_T: RDD[(Int, Array[Array[Short]])],
                               gainTable: Array[Double],
                               boostingStrategy: BoostingStrategy,
                               params: Params,
@@ -388,21 +387,21 @@ object LambdaMART extends Logging {
 
     val lambdas = new Array[Double](numSamples)
     var ni = 0
-    while(ni<numSamples){
+    while (ni < numSamples) {
       lambdas(ni) = -2 * (label(ni) - initScores(ni))
-      ni+=1
+      ni += 1
     }
 
-//    val weights = new Array[Double](numSamples)
+    //    val weights = new Array[Double](numSamples)
     val weightsBc = sc.broadcast(Array.empty[Double])
     timer.stop("init")
 
     val currentScores = initScores
     var initErrors = 0.0
     ni = 0
-    while(ni<numSamples){
+    while (ni < numSamples) {
       initErrors += loss.computeError(currentScores(ni), label(ni))
-      ni+=1
+      ni += 1
     }
     initErrors /= numSamples
     println(s"logloss initError sum = $initErrors")
@@ -413,9 +412,10 @@ object LambdaMART extends Logging {
     var earlystop = false
     val useEarlystop = params.useEarlystop
     var phase = 0
-//    val oldRep = new Array[Double](numSamples)
+    val oldRep = if (params.active_lambda_learningStrategy) new Array[Double](numSamples) else Array.empty[Double]
     val validationSpan = params.validationSpan
-//    val multiplier_Score = 1.0
+    //    val multiplier_Score = 1.0
+    val learningStrategy = params.learningStrategy
     while (phase < numPhases && !earlystop) {
       numIterations += params.numIterations(phase)
 
@@ -425,6 +425,31 @@ object LambdaMART extends Logging {
         //update lambda
         Range(0, numSamples).par.foreach { ni =>
           lambdas(ni) = -loss.gradient(currentScores(ni), label(ni))
+        }
+
+        if (params.active_lambda_learningStrategy) {
+          val rho_lambda = params.rho_lambda
+          if (learningStrategy == "sgd") {
+          }
+          else if (learningStrategy == "momentum") {
+            Range(0, numSamples).par.foreach { si =>
+              lambdas(si) = rho_lambda * oldRep(si) + lambdas(si)
+              oldRep(si) = lambdas(si)
+            }
+          }
+          else if (learningStrategy == "adagrad") {
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) += lambdas(si) * lambdas(si)
+              lambdas(si) = lambdas(si) / math.sqrt(oldRep(si)+1.0)
+            }
+          }
+          else if (learningStrategy == "adadelta") {
+            Range(0, numSamples).par.foreach { si =>
+              oldRep(si) = rho_lambda * oldRep(si) + (1 - rho_lambda) * lambdas(si) * lambdas(si)
+              lambdas(si) = lambdas(si) / scala.math.sqrt(oldRep(si) + 1.0)
+
+            }
+          }
         }
 
         val lambdasBc = sc.broadcast(lambdas)
@@ -438,12 +463,12 @@ object LambdaMART extends Logging {
         }
 
         var si = 0
-        var sumLambda=0.0
+        var sumLambda = 0.0
         var sumSquare = 0.0
-        while(si<lambdas.length){
-          sumLambda+=lambdas(si)
-          sumSquare+=lambdas(si)*lambdas(si)
-          si+=1
+        while (si < lambdas.length) {
+          sumLambda += lambdas(si)
+          sumSquare += lambdas(si) * lambdas(si)
+          si += 1
         }
         val topValue = (numSamples, sumLambda, sumSquare, 0.0)
         val tree = new LambdaMARTDecisionTree(treeStrategy, params.minInstancesPerNode(phase),
@@ -513,16 +538,34 @@ object LambdaMART extends Logging {
         // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
         //model.sequence("treeEnsemble.ini", model, m + 1)
 
-//        if(m%1==0){
-//          val scoreAndLabels = new Array[(Double,Double)](10000)
-//          Range(0,1000000, 100).foreach{it=>
-//            scoreAndLabels(it/100)=(currentScores(it), label(it).toDouble)
-//          }
-//          val slRDD = sc.makeRDD(scoreAndLabels)
-//          val metrics = new BinaryClassificationMetrics(slRDD)
-//          val accuracy = metrics.areaUnderROC()
-//          println(s"Accuracy at $m = $accuracy")
-//        }
+        if (m % params.testSpan == 0) {
+          val scoreAndLabels = new Array[(Double, Double)](10000)
+          Range(0, 1000000, 100).foreach { it =>
+            if (currentScores(it) >= 0)
+              scoreAndLabels(it / 100) = (1.0, label(it).toDouble)
+            else
+              scoreAndLabels(it / 100) = (-1.0, label(it).toDouble)
+          }
+          val slRDD = sc.makeRDD(scoreAndLabels)
+          val metrics = new BinaryClassificationMetrics(slRDD)
+          val accuracy = metrics.areaUnderROC()
+          println(s"test Accuracy at $m = $accuracy")
+        }
+        if (m % params.validationSpan == 0 || m == numIterations - 1) {
+          val scoreAndLabels = new Array[(Double, Double)](label.length)
+          var i = 0
+          while (i < label.length) {
+            if (currentScores(i) >= 0)
+              scoreAndLabels(i) = (1.0, label(i).toDouble)
+            else
+              scoreAndLabels(i) = (-1.0, label(i).toDouble)
+            i += 1
+          }
+          val slRDD = sc.makeRDD(scoreAndLabels)
+          val metrics = new BinaryClassificationMetrics(slRDD)
+          val accuracy = metrics.areaUnderROC()
+          println(s"training Accuracy at $m = $accuracy")
+        }
 
         m += 1
       }
@@ -618,7 +661,6 @@ object LambdaMART extends Logging {
     }
     partAct.map(x => (x._3, x._4, x._5, x._6)).reduce((a, b) => (a._1 + b._1, a._2 + b._2, a._3 + b._3, a._4 + b._4))
   }
-
 
 
   def evaluateErrors(pdcRDD: RDD[(Int, Int)],
