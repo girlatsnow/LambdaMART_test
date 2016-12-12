@@ -1,6 +1,6 @@
 name := "LambdaMART"
 
-version := "2.2"
+version := "4.0"
 
 scalaVersion := "2.10.6"
 scalaBinaryVersion := "2.10"

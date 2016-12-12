@@ -327,6 +327,12 @@ object LambdaMART extends Logging {
         // println("error of gbt = " + currentScores.iterator.map(re => re * re).sum / numSamples)
         //model.sequence("treeEnsemble.ini", model, m + 1)
         m += 1
+
+        if(m%100==0){
+          println(s"checkpoint at iteration $m")
+          val chkp = new GradientBoostedDecisionTreesModel(Regression, baseLearners.take(m), baseLearnerWeights.take(m))
+          chkp.save(sc, s"/data/lambdaMart/lambdaMart.$m.model")
+        }
       }
       phase += 1
     }
@@ -568,6 +574,11 @@ object LambdaMART extends Logging {
         }
 
         m += 1
+        if(m%100==0){
+          println(s"checkpoint at iteration $m")
+          val chkp = new GradientBoostedDecisionTreesModel(Regression, baseLearners.take(m), baseLearnerWeights.take(m))
+          chkp.save(sc, s"/data/lambdaMart/lambdaMart.$m.model")
+        }
       }
       phase += 1
     }

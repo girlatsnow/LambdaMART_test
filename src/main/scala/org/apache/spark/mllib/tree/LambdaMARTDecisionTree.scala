@@ -323,8 +323,12 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
           //            histograms(ni).update(value, sampleWeight, lcLambdas(index), lcWeights(index))
           //          }
           if (ni >= 0) {
-            histograms(ni).update(value, sampleWeight, lcLambdas(index), lcWeights(index))
-//            histograms(ni).update(value, sampleWeight, lcLambdas(index),0.0)
+            algo match {
+              case LambdaMart =>
+                histograms(ni).update(value, sampleWeight, lcLambdas(index), lcWeights(index))
+              case Regression =>
+                histograms(ni).update(value, sampleWeight, lcLambdas(index), 0.0)
+            }
           }
           offset += 1
         }
@@ -363,6 +367,7 @@ object LambdaMARTDecisionTree extends Serializable with Logging {
       node.isLeaf = isLeaf
       node.stats = Some(stats)
       node.impurity = stats.impurity
+
       logDebug("Node = " + node)
       logDebug("LeftInfo = " + leftNodeInfo)
       logDebug("RightInfo = " + rtNodeInfo)
